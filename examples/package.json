@@ -1,0 +1,19 @@
+{
+  "name": "client-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "client": "tsx client.ts"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "viem": "^2.23.1",
+    "x402-fetch": "^0.3.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}
