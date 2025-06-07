@@ -207,7 +207,7 @@ func (prt *PaymentRoundTripper) createAuthorization(requirements *x402types.Paym
 
 // signAuthorization signs the authorization using EIP-712
 func (prt *PaymentRoundTripper) signAuthorization(auth *x402types.ExactEvmPayloadAuthorization) (string, error) {
-	// This is a simplified signature - in production you'd want to use proper EIP-712
+	// TODO(marko): Use EIP-712 structured data signing
 	hash := crypto.Keccak256Hash([]byte(fmt.Sprintf("%s%s%s%s%s%s",
 		auth.From, auth.To, auth.Value, auth.ValidAfter, auth.ValidBefore, auth.Nonce)))
 
