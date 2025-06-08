@@ -262,3 +262,6 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# bin
+x402-dev-facilitator

@@ -1,4 +1,4 @@
-module github.com/x40/x402-tenderly
+module github.com/delta003/x402-dev-facilitator
 
 go 1.24.4
 
