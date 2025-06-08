@@ -1,6 +1,6 @@
 # x402-dev-facilitator
 
-Run the x402 facilitator on a custom network.
+Run the [x402](https://www.x402.org/) facilitator on a custom network.
 
 Built to be used with Tenderly's virtual networks - using testnets sucks!.
 
