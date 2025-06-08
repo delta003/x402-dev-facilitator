@@ -1,9 +1,10 @@
-package main
+package core
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"strconv"
@@ -180,7 +181,7 @@ func (f *Facilitator) SettlePayment(ctx context.Context, paymentHeader string, r
 	// Decode the payment payload
 	payload, err := x402types.DecodePaymentPayloadFromBase64(paymentHeader)
 	if err != nil {
-		panic("unreachable: invalid payment payload format")
+		log.Fatal("unreachable: invalid payment payload format")
 	}
 
 	// Submit the transaction
@@ -305,7 +306,6 @@ func (f *Facilitator) verifySignature(payload *x402types.ExactEvmPayload) bool {
 		return false
 	}
 
-	// TODO(marko): No idea about this...
 	// Create EIP-712 typed data
 	chainIdHex := math.NewHexOrDecimal256(f.chainID.Int64())
 	typedData := apitypes.TypedData{

@@ -1,100 +1,49 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
+	"github.com/x40/x402-tenderly/core"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"time"
-
-	x402types "github.com/coinbase/x402/go/pkg/types"
+	"strconv"
 )
 
 type Client struct {
 	serverURL string
-	client    *http.Client
+	client    *core.Client
 }
 
-func NewClient(serverURL string) *Client {
+func NewClient(serverURL string, privateKey string, chainId int64) (*Client, error) {
+	client, err := core.NewClientFromHex(privateKey, chainId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create client from private key: %w", err)
+	}
 	return &Client{
 		serverURL: serverURL,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-	}
+		client:    client,
+	}, nil
 }
 
-func (c *Client) GetTip() error {
+func (c *Client) Tip(ctx context.Context) error {
 	url := c.serverURL + "/tip"
 
-	// First request - expect 402 Payment Required
-	resp, err := c.client.Get(url)
+	resp, err := c.client.Get(ctx, url)
 	if err != nil {
-		return fmt.Errorf("failed to make initial request: %w", err)
+		return fmt.Errorf("failed to make request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusPaymentRequired {
-		if resp.StatusCode == http.StatusOK {
-			// Payment not required, read response
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("failed to read response: %w", err)
-			}
-			fmt.Printf("Success! Response: %s\n", string(body))
-			return nil
-		}
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse 402 response to get payment requirements
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read 402 response: %w", err)
-	}
-
-	var paymentRequirements x402types.PaymentRequirements
-	if err := json.Unmarshal(body, &paymentRequirements); err != nil {
-		return fmt.Errorf("failed to parse payment requirements response: %w", err)
-	}
-
-	fmt.Printf("Payment required. Details: %+v\n", paymentRequirements)
-
-	// TODO(marko): Create and sign payload.
-	paymentPayload := x402types.PaymentPayload{}
-
-	paymentData, err := json.Marshal(paymentPayload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payment payload: %w", err)
-	}
-
-	// Make the request again with payment
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("X-PAYMENT", string(paymentData))
-
-	resp2, err := c.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to make paid request: %w", err)
-	}
-	defer func() { _ = resp2.Body.Close() }()
-
-	body2, err := io.ReadAll(resp2.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read paid response: %w", err)
-	}
-
-	if resp2.StatusCode == http.StatusOK {
-		fmt.Printf("Payment successful! Response: %s\n", string(body2))
-		return nil
-	}
-
-	return fmt.Errorf("payment failed with status %d: %s", resp2.StatusCode, string(body2))
+	fmt.Printf("Received tip response: %s\n", string(body))
+	return nil
 }
 
 func main() {
@@ -102,11 +51,26 @@ func main() {
 	if serverPort == "" {
 		serverPort = "4021" // Default port if not set
 	}
+	privateKey := os.Getenv("PRIVATE_KEY")
+	if privateKey == "" {
+		log.Fatal("PRIVATE_KEY environment variable is not set")
+	}
+	strChainID := os.Getenv("CHAIN_ID")
+	if strChainID == "" {
+		log.Fatal("CHAIN_ID environment variable is not set")
+	}
+	chainID, err := strconv.ParseInt(strChainID, 10, 64)
+	if err != nil {
+		log.Fatalf("Invalid CHAIN_ID: %v", err)
+	}
 
-	client := NewClient("http://localhost:" + serverPort)
+	client, err := NewClient("http://localhost:"+serverPort, privateKey, chainID)
+	if err != nil {
+		log.Fatalf("Failed to create client: %v", err)
+	}
 
 	fmt.Printf("Attempting to tip server...")
-	if err := client.GetTip(); err != nil {
+	if err := client.Tip(context.Background()); err != nil {
 		log.Fatalf("Failed to tip: %v", err)
 	}
 }

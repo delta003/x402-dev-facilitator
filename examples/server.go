@@ -31,7 +31,7 @@ func main() {
 	// Get URL and port from environment variables.
 	facilitatorURL := os.Getenv("FACILITATOR_URL")
 	if facilitatorURL == "" {
-		panic("FACILITATOR_URL environment variable is not set")
+		log.Fatal("FACILITATOR_URL environment variable is not set")
 	}
 	port := os.Getenv("SERVER_PORT")
 	if port == "" {
@@ -39,7 +39,7 @@ func main() {
 	}
 	walletAddress := os.Getenv("WALLET_ADDRESS")
 	if walletAddress == "" {
-		panic("WALLET_ADDRESS environment variable is not set")
+		log.Fatal("WALLET_ADDRESS environment variable is not set")
 	}
 
 	facilitatorConfig := &types.FacilitatorConfig{
@@ -63,7 +63,7 @@ func main() {
 
 	err := r.Run(":" + port)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 }
 

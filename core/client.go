@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"bytes"
@@ -14,7 +14,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 
 	x402types "github.com/coinbase/x402/go/pkg/types"
 )
@@ -207,13 +210,80 @@ func (prt *PaymentRoundTripper) createAuthorization(requirements *x402types.Paym
 
 // signAuthorization signs the authorization using EIP-712
 func (prt *PaymentRoundTripper) signAuthorization(auth *x402types.ExactEvmPayloadAuthorization) (string, error) {
-	// TODO(marko): Use EIP-712 structured data signing
-	hash := crypto.Keccak256Hash([]byte(fmt.Sprintf("%s%s%s%s%s%s",
-		auth.From, auth.To, auth.Value, auth.ValidAfter, auth.ValidBefore, auth.Nonce)))
+	// Parse values from authorization
+	value, ok := new(big.Int).SetString(auth.Value, 10)
+	if !ok {
+		return "", fmt.Errorf("invalid value: %s", auth.Value)
+	}
 
-	signature, err := crypto.Sign(hash.Bytes(), prt.client.privateKey)
+	validAfter, ok := new(big.Int).SetString(auth.ValidAfter, 10)
+	if !ok {
+		return "", fmt.Errorf("invalid validAfter: %s", auth.ValidAfter)
+	}
+
+	validBefore, ok := new(big.Int).SetString(auth.ValidBefore, 10)
+	if !ok {
+		return "", fmt.Errorf("invalid validBefore: %s", auth.ValidBefore)
+	}
+
+	// Create EIP-712 typed data
+	chainIdHex := math.NewHexOrDecimal256(prt.client.chainID)
+	typedData := apitypes.TypedData{
+		Types: apitypes.Types{
+			"EIP712Domain": {
+				{Name: "name", Type: "string"},
+				{Name: "version", Type: "string"},
+				{Name: "chainId", Type: "uint256"},
+				{Name: "verifyingContract", Type: "address"},
+			},
+			"PaymentAuthorization": {
+				{Name: "from", Type: "address"},
+				{Name: "to", Type: "address"},
+				{Name: "value", Type: "uint256"},
+				{Name: "validAfter", Type: "uint256"},
+				{Name: "validBefore", Type: "uint256"},
+				{Name: "nonce", Type: "bytes32"},
+			},
+		},
+		PrimaryType: "PaymentAuthorization",
+		Domain: apitypes.TypedDataDomain{
+			Name:              "x402",
+			Version:           "1",
+			ChainId:           chainIdHex,
+			VerifyingContract: "0x0000000000000000000000000000000000000000",
+		},
+		Message: apitypes.TypedDataMessage{
+			"from":        auth.From,
+			"to":          auth.To,
+			"value":       (*hexutil.Big)(value),
+			"validAfter":  (*hexutil.Big)(validAfter),
+			"validBefore": (*hexutil.Big)(validBefore),
+			"nonce":       auth.Nonce,
+		},
+	}
+
+	// Hash the typed data
+	hash, err := typedData.HashStruct("PaymentAuthorization", typedData.Message)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to hash struct: %w", err)
+	}
+
+	domainSeparator, err := typedData.HashStruct("EIP712Domain", typedData.Domain.Map())
+	if err != nil {
+		return "", fmt.Errorf("failed to hash domain: %w", err)
+	}
+
+	// Create final hash with EIP-712 prefix
+	finalHash := crypto.Keccak256Hash(
+		[]byte("\x19\x01"),
+		domainSeparator,
+		hash,
+	)
+
+	// Sign the hash
+	signature, err := crypto.Sign(finalHash.Bytes(), prt.client.privateKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign: %w", err)
 	}
 
 	// Adjust recovery ID for Ethereum

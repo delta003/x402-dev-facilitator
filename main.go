@@ -16,7 +16,7 @@ func main() {
 	// Get configuration from environment
 	rpcURL := os.Getenv("RPC_URL")
 	if rpcURL == "" {
-		panic("RPC_URL environment variable not set")
+		log.Fatal("RPC_URL environment variable not set")
 	}
 	network := os.Getenv("NETWORK")
 	if network == "" {
