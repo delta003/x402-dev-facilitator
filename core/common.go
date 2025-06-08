@@ -1,73 +1,27 @@
-package main
+package core
 
 import (
 	"bytes"
 	"encoding/base64"
+	"github.com/gin-gonic/gin"
 	"io"
 	"log"
-	"math/big"
-	"os"
 	"strings"
 	"time"
-
-	x402gin "github.com/coinbase/x402/go/pkg/gin"
-	"github.com/coinbase/x402/go/pkg/types"
-	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
 )
 
-func main() {
-	// Load environment variables from .env file
-	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, using system environment variables")
-	}
-
-	r := gin.Default()
-
-	// Add detailed logging middleware
-	r.Use(detailedLoggingMiddleware())
-	r.Use(gin.Recovery())
-
-	// Get URL and port from environment variables.
-	facilitatorURL := os.Getenv("FACILITATOR_URL")
-	if facilitatorURL == "" {
-		log.Fatal("FACILITATOR_URL environment variable is not set")
-	}
-	port := os.Getenv("SERVER_PORT")
-	if port == "" {
-		port = "4021" // Default port if not set
-	}
-	walletAddress := os.Getenv("WALLET_ADDRESS")
-	if walletAddress == "" {
-		log.Fatal("WALLET_ADDRESS environment variable is not set")
-	}
-
-	facilitatorConfig := &types.FacilitatorConfig{
-		URL: facilitatorURL,
-	}
-
-	r.GET(
-		"/tip",
-		x402gin.PaymentMiddleware(
-			big.NewFloat(0.0001),
-			walletAddress,
-			x402gin.WithFacilitatorConfig(facilitatorConfig),
-			x402gin.WithResource("http://localhost:"+port+"/tip"),
-		),
-		func(c *gin.Context) {
-			c.JSON(200, gin.H{
-				"msg": "Thanks!",
-			})
-		},
-	)
-
-	err := r.Run(":" + port)
-	if err != nil {
-		log.Fatal(err)
-	}
+// responseBodyWriter wraps gin.ResponseWriter to capture response body
+type responseBodyWriter struct {
+	gin.ResponseWriter
+	body *bytes.Buffer
 }
 
-func detailedLoggingMiddleware() gin.HandlerFunc {
+func (w *responseBodyWriter) Write(b []byte) (int, error) {
+	w.body.Write(b)
+	return w.ResponseWriter.Write(b)
+}
+
+func DetailedLoggingMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		startTime := time.Now()
 
@@ -107,6 +61,14 @@ func detailedLoggingMiddleware() gin.HandlerFunc {
 		}
 		log.Printf("=== REQUEST END ===\n")
 
+		// Wrap the response writer to capture response body
+		responseBody := &bytes.Buffer{}
+		bodyWriter := &responseBodyWriter{
+			ResponseWriter: c.Writer,
+			body:          responseBody,
+		}
+		c.Writer = bodyWriter
+
 		// Process request
 		c.Next()
 
@@ -131,6 +93,14 @@ func detailedLoggingMiddleware() gin.HandlerFunc {
 				}
 			}
 		}
+		
+		// Log response body
+		if responseBody.Len() > 0 {
+			log.Printf("Response Body: %s", responseBody.String())
+		} else {
+			log.Printf("Response Body: (empty)")
+		}
+		
 		log.Printf("=== RESPONSE END ===\n")
 	}
 }

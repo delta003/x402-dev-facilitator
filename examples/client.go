@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"github.com/joho/godotenv"
 	"github.com/x40/x402-tenderly/core"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"strconv"
@@ -21,6 +25,9 @@ func NewClient(serverURL string, privateKey string, chainId int64) (*Client, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client from private key: %w", err)
 	}
+
+	client.SetMaxValue(big.NewInt(100_000_000))
+
 	return &Client{
 		serverURL: serverURL,
 		client:    client,
@@ -43,17 +50,50 @@ func (c *Client) Tip(ctx context.Context) error {
 	}
 
 	fmt.Printf("Received tip response: %s\n", string(body))
+
+	// Decode and print X-PAYMENT-RESPONSE header if it exists
+	paymentResponseHeader := resp.Header.Get("X-PAYMENT-RESPONSE")
+	if paymentResponseHeader != "" {
+		fmt.Printf("X-PAYMENT-RESPONSE header found\n")
+
+		// Try to decode base64
+		if decoded, err := base64.StdEncoding.DecodeString(paymentResponseHeader); err == nil {
+			fmt.Printf("Decoded payment response: %s\n", string(decoded))
+
+			// Try to parse as JSON
+			var paymentResponse map[string]interface{}
+			if err := json.Unmarshal(decoded, &paymentResponse); err == nil {
+				fmt.Printf("Parsed payment response:\n")
+				for key, value := range paymentResponse {
+					fmt.Printf("  %s: %v\n", key, value)
+				}
+			} else {
+				fmt.Printf("Could not parse payment response as JSON: %v\n", err)
+			}
+		} else {
+			fmt.Printf("Could not decode payment response from base64: %v\n", err)
+			fmt.Printf("Raw payment response: %s\n", paymentResponseHeader)
+		}
+	} else {
+		fmt.Printf("No X-PAYMENT-RESPONSE header found\n")
+	}
+
 	return nil
 }
 
 func main() {
-	serverPort := os.Getenv("SERVER_PORT")
-	if serverPort == "" {
-		serverPort = "4021" // Default port if not set
+	// Load environment variables from .env file
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, using system environment variables")
 	}
-	privateKey := os.Getenv("PRIVATE_KEY")
+
+	serverURL := os.Getenv("SERVER_URL")
+	if serverURL == "" {
+		log.Fatal("SERVER_URL environment variable is not set")
+	}
+	privateKey := os.Getenv("WALLET_PRIVATE_KEY")
 	if privateKey == "" {
-		log.Fatal("PRIVATE_KEY environment variable is not set")
+		log.Fatal("WALLET_PRIVATE_KEY environment variable is not set")
 	}
 	strChainID := os.Getenv("CHAIN_ID")
 	if strChainID == "" {
@@ -64,12 +104,11 @@ func main() {
 		log.Fatalf("Invalid CHAIN_ID: %v", err)
 	}
 
-	client, err := NewClient("http://localhost:"+serverPort, privateKey, chainID)
+	client, err := NewClient(serverURL, privateKey, chainID)
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)
 	}
 
-	fmt.Printf("Attempting to tip server...")
 	if err := client.Tip(context.Background()); err != nil {
 		log.Fatalf("Failed to tip: %v", err)
 	}

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
@@ -118,16 +117,24 @@ func (prt *PaymentRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 func (prt *PaymentRoundTripper) handlePaymentRequired(originalReq *http.Request, resp *http.Response) (*http.Response, error) {
 	defer resp.Body.Close()
 
-	// Read the payment requirements
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read 402 response: %w", err)
+	var req struct {
+		X402Version int                             `json:"x402Version"`
+		Accepts     []x402types.PaymentRequirements `json:"accepts"`
+		Error       string                          `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&req); err != nil {
+		return nil, fmt.Errorf("failed to parse 402 response: %w", err)
 	}
 
-	var paymentRequirements x402types.PaymentRequirements
-	if err := json.Unmarshal(body, &paymentRequirements); err != nil {
-		return nil, fmt.Errorf("failed to parse payment response: %w", err)
+	if req.X402Version != x402Version {
+		return nil, fmt.Errorf("unsupported x402 version: %d, expected: %d", req.X402Version, x402Version)
 	}
+	// Check if we have any payment requirements
+	if len(req.Accepts) == 0 {
+		return nil, fmt.Errorf("no payment requirements provided in 402 response")
+	}
+	// Use the first payment requirement
+	paymentRequirements := req.Accepts[0]
 
 	// Validate amount against maximum
 	maxAmount, ok := new(big.Int).SetString(paymentRequirements.MaxAmountRequired, 10)
@@ -236,7 +243,7 @@ func (prt *PaymentRoundTripper) signAuthorization(auth *x402types.ExactEvmPayloa
 				{Name: "chainId", Type: "uint256"},
 				{Name: "verifyingContract", Type: "address"},
 			},
-			"PaymentAuthorization": {
+			"TransferWithAuthorization": {
 				{Name: "from", Type: "address"},
 				{Name: "to", Type: "address"},
 				{Name: "value", Type: "uint256"},
@@ -245,25 +252,25 @@ func (prt *PaymentRoundTripper) signAuthorization(auth *x402types.ExactEvmPayloa
 				{Name: "nonce", Type: "bytes32"},
 			},
 		},
-		PrimaryType: "PaymentAuthorization",
+		PrimaryType: "TransferWithAuthorization",
 		Domain: apitypes.TypedDataDomain{
-			Name:              "x402",
-			Version:           "1",
+			Name:              "USD Coin",
+			Version:           "2",
 			ChainId:           chainIdHex,
-			VerifyingContract: "0x0000000000000000000000000000000000000000",
+			VerifyingContract: baseUSDCAddress,
 		},
 		Message: apitypes.TypedDataMessage{
 			"from":        auth.From,
 			"to":          auth.To,
-			"value":       (*hexutil.Big)(value),
-			"validAfter":  (*hexutil.Big)(validAfter),
-			"validBefore": (*hexutil.Big)(validBefore),
+			"value":       value,
+			"validAfter":  validAfter,
+			"validBefore": validBefore,
 			"nonce":       auth.Nonce,
 		},
 	}
 
 	// Hash the typed data
-	hash, err := typedData.HashStruct("PaymentAuthorization", typedData.Message)
+	hash, err := typedData.HashStruct("TransferWithAuthorization", typedData.Message)
 	if err != nil {
 		return "", fmt.Errorf("failed to hash struct: %w", err)
 	}
@@ -286,8 +293,8 @@ func (prt *PaymentRoundTripper) signAuthorization(auth *x402types.ExactEvmPayloa
 		return "", fmt.Errorf("failed to sign: %w", err)
 	}
 
-	// Adjust recovery ID for Ethereum
-	if signature[64] < 27 {
+	// Adjust v (EIP-712 signatures require v to be 27 or 28)
+	if signature[64] == 0 || signature[64] == 1 {
 		signature[64] += 27
 	}
 

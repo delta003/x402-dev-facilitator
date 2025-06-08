@@ -6,16 +6,16 @@ import { decodeXPaymentResponse, wrapFetchWithPayment } from "x402-fetch";
 config();
 
 const privateKey = process.env.WALLET_PRIVATE_KEY as Hex;
-const serverPort = process.env.SERVER_PORT || "4021";
-const url = `http://localhost:${serverPort}/tip`;
+const serverURL = process.env.SERVER_URL;
 
-if (!privateKey) {
+if (!privateKey || !serverURL) {
   console.error("Missing required environment variables");
   process.exit(1);
 }
+const url = `${serverURL}/tip`;
 
 const account = privateKeyToAccount(privateKey);
-const fetchWithPayment = wrapFetchWithPayment(fetch, account);
+const fetchWithPayment = wrapFetchWithPayment(fetch, account, 100 * 10 ** 6);  // At most 100
 
 async function main() {
   try {
@@ -37,8 +37,6 @@ async function main() {
       const paymentResponse = decodeXPaymentResponse(paymentResponseHeader);
       console.log("Payment response:", paymentResponse);
     }
-    
-    console.log("Tip completed successfully!");
   } catch (error) {
     console.error("Failed to tip:", error);
     process.exit(1);

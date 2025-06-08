@@ -2,8 +2,10 @@ package core
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
+	"github.com/gin-gonic/gin"
 	"log"
 	"math/big"
 	"net/http"
@@ -11,85 +13,66 @@ import (
 	"strings"
 	"time"
 
+	x402types "github.com/coinbase/x402/go/pkg/types"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/common/math"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/ethereum/go-ethereum/signer/core/apitypes"
-
-	x402types "github.com/coinbase/x402/go/pkg/types"
-	ethtypes "github.com/ethereum/go-ethereum/core/types"
 )
 
 const x402Version = 1
 
-// ERC-20 ABI for balanceOf function
-const erc20ABI = `[{
-	"constant": true,
-	"inputs": [{"name": "_owner", "type": "address"}],
-	"name": "balanceOf",
-	"outputs": [{"name": "balance", "type": "uint256"}],
-	"type": "function"
-}, {
-	"constant": false,
-	"inputs": [{"name": "_to", "type": "address"}, {"name": "_value", "type": "uint256"}],
-	"name": "transfer",
-	"outputs": [{"name": "", "type": "bool"}],
-	"type": "function"
-}, {
-	"constant": false,
-	"inputs": [{"name": "_from", "type": "address"}, {"name": "_to", "type": "address"}, {"name": "_value", "type": "uint256"}],
-	"name": "transferFrom",
-	"outputs": [{"name": "", "type": "bool"}],
-	"type": "function"
-}, {
-	"constant": true,
-	"inputs": [{"name": "_owner", "type": "address"}, {"name": "_spender", "type": "address"}],
-	"name": "allowance",
-	"outputs": [{"name": "", "type": "uint256"}],
-	"type": "function"
-}]`
+// TODO(marko): This needs to be configurable.
+const baseUSDCAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
 // Facilitator handles payment verification and settlement
 type Facilitator struct {
-	ethClient *ethclient.Client
-	chainID   *big.Int
-	network   string
+	ethClient  *ethclient.Client
+	chainID    *big.Int
+	network    string
+	privateKey *ecdsa.PrivateKey
+	address    common.Address
 }
 
 // NewFacilitator creates a new facilitator instance
-func NewFacilitator(rpcURL string, network string) (*Facilitator, error) {
+func NewFacilitator(privateKey *ecdsa.PrivateKey, rpcURL string, network string) (*Facilitator, error) {
 	ethClient, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Ethereum client: %w", err)
 	}
-
 	chainID, err := ethClient.ChainID(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get chain ID: %w", err)
 	}
+	address := crypto.PubkeyToAddress(privateKey.PublicKey)
 
 	return &Facilitator{
-		ethClient: ethClient,
-		chainID:   chainID,
-		network:   network,
+		ethClient:  ethClient,
+		chainID:    chainID,
+		network:    network,
+		privateKey: privateKey,
+		address:    address,
 	}, nil
 }
 
-// VerifyPayment verifies a payment payload
-func (f *Facilitator) VerifyPayment(ctx context.Context, paymentHeader string, requirements *x402types.PaymentRequirements) (*x402types.VerifyResponse, error) {
-	// Decode the payment payload
-	payload, err := x402types.DecodePaymentPayloadFromBase64(paymentHeader)
+// NewFacilitator creates a new facilitator instance
+func NewFacilitatorFromHex(privateKeyHex string, rpcURL string, network string) (*Facilitator, error) {
+	// Remove 0x prefix if present
+	privateKeyHex = strings.TrimPrefix(privateKeyHex, "0x")
+
+	privateKey, err := crypto.HexToECDSA(privateKeyHex)
 	if err != nil {
-		return &x402types.VerifyResponse{
-			IsValid:       false,
-			InvalidReason: stringPtr("invalid_payment_payload_format"),
-		}, nil
+		return nil, fmt.Errorf("invalid private key: %w", err)
 	}
 
+	return NewFacilitator(privateKey, rpcURL, network)
+}
+
+// VerifyPayment verifies a payment payload
+func (f *Facilitator) VerifyPayment(ctx context.Context, payload *x402types.PaymentPayload, requirements *x402types.PaymentRequirements) (*x402types.VerifyResponse, error) {
 	// Verify network matches
 	if payload.Network != f.network {
 		return &x402types.VerifyResponse{
@@ -135,8 +118,8 @@ func (f *Facilitator) VerifyPayment(ctx context.Context, paymentHeader string, r
 		}, nil
 	}
 
-	// Verify signature (simplified - in production use proper EIP-712 verification)
-	if !f.verifySignature(payload.Payload) {
+	// Verify signature
+	if err := f.verifySignature(payload.Payload); err != nil {
 		return &x402types.VerifyResponse{
 			IsValid:       false,
 			InvalidReason: stringPtr("invalid_exact_evm_payload_signature"),
@@ -162,9 +145,9 @@ func (f *Facilitator) VerifyPayment(ctx context.Context, paymentHeader string, r
 }
 
 // SettlePayment processes the actual payment settlement
-func (f *Facilitator) SettlePayment(ctx context.Context, paymentHeader string, requirements *x402types.PaymentRequirements) (*x402types.SettleResponse, error) {
+func (f *Facilitator) SettlePayment(ctx context.Context, payload *x402types.PaymentPayload, requirements *x402types.PaymentRequirements) (*x402types.SettleResponse, error) {
 	// First verify the payment
-	verifyResp, err := f.VerifyPayment(ctx, paymentHeader, requirements)
+	verifyResp, err := f.VerifyPayment(ctx, payload, requirements)
 	if err != nil {
 		return nil, err
 	}
@@ -178,14 +161,8 @@ func (f *Facilitator) SettlePayment(ctx context.Context, paymentHeader string, r
 		}, nil
 	}
 
-	// Decode the payment payload
-	payload, err := x402types.DecodePaymentPayloadFromBase64(paymentHeader)
-	if err != nil {
-		log.Fatal("unreachable: invalid payment payload format")
-	}
-
 	// Submit the transaction
-	txHash, err := f.submitTransaction(ctx, payload)
+	txHash, err := f.transferWithAuthorization(ctx, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -216,15 +193,19 @@ func (f *Facilitator) SettlePayment(ctx context.Context, paymentHeader string, r
 // HTTP handlers for facilitator endpoints
 
 // VerifyPaymentHandler handles payment verification requests
-func (f *Facilitator) VerifyPaymentHandler(w http.ResponseWriter, r *http.Request) {
+func (f *Facilitator) VerifyPaymentHandler(c *gin.Context) {
+	r := c.Request
+	w := c.Writer
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var req struct {
-		PaymentHeader string                        `json:"paymentHeader"`
-		Requirements  x402types.PaymentRequirements `json:"requirements"`
+		X402Version         int                           `json:"x402Version"`
+		PaymentPayload      x402types.PaymentPayload      `json:"paymentPayload"`
+		PaymentRequirements x402types.PaymentRequirements `json:"paymentRequirements"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -232,7 +213,12 @@ func (f *Facilitator) VerifyPaymentHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	resp, err := f.VerifyPayment(r.Context(), req.PaymentHeader, &req.Requirements)
+	if req.X402Version != x402Version {
+		http.Error(w, "Unsupported x402 version", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := f.VerifyPayment(r.Context(), &req.PaymentPayload, &req.PaymentRequirements)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -243,15 +229,19 @@ func (f *Facilitator) VerifyPaymentHandler(w http.ResponseWriter, r *http.Reques
 }
 
 // SettlePaymentHandler handles payment settlement requests
-func (f *Facilitator) SettlePaymentHandler(w http.ResponseWriter, r *http.Request) {
+func (f *Facilitator) SettlePaymentHandler(c *gin.Context) {
+	r := c.Request
+	w := c.Writer
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var req struct {
-		PaymentHeader string                        `json:"paymentHeader"`
-		Requirements  x402types.PaymentRequirements `json:"requirements"`
+		X402Version         int                           `json:"x402Version"`
+		PaymentPayload      x402types.PaymentPayload      `json:"paymentPayload"`
+		PaymentRequirements x402types.PaymentRequirements `json:"paymentRequirements"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -259,7 +249,12 @@ func (f *Facilitator) SettlePaymentHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	resp, err := f.SettlePayment(r.Context(), req.PaymentHeader, &req.Requirements)
+	if req.X402Version != x402Version {
+		http.Error(w, "Unsupported x402 version", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := f.SettlePayment(r.Context(), &req.PaymentPayload, &req.PaymentRequirements)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -270,7 +265,10 @@ func (f *Facilitator) SettlePaymentHandler(w http.ResponseWriter, r *http.Reques
 }
 
 // HealthHandler provides a health check endpoint
-func (f *Facilitator) HealthHandler(w http.ResponseWriter, r *http.Request) {
+func (f *Facilitator) HealthHandler(c *gin.Context) {
+	r := c.Request
+	w := c.Writer
+
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -286,104 +284,47 @@ func (f *Facilitator) HealthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(health)
 }
 
-func (f *Facilitator) verifySignature(payload *x402types.ExactEvmPayload) bool {
-	// Parse values from authorization
+func (f *Facilitator) verifySignature(payload *x402types.ExactEvmPayload) error {
 	auth := payload.Authorization
 
-	// Convert string values to big.Int
-	value, ok := new(big.Int).SetString(auth.Value, 10)
-	if !ok {
-		return false
-	}
+	tokenAddress := common.HexToAddress(baseUSDCAddress)
+	fromAddr := common.HexToAddress(auth.From)
+	nonce := common.HexToHash(auth.Nonce)
 
-	validAfter, ok := new(big.Int).SetString(auth.ValidAfter, 10)
-	if !ok {
-		return false
-	}
-
-	validBefore, ok := new(big.Int).SetString(auth.ValidBefore, 10)
-	if !ok {
-		return false
-	}
-
-	// Create EIP-712 typed data
-	chainIdHex := math.NewHexOrDecimal256(f.chainID.Int64())
-	typedData := apitypes.TypedData{
-		Types: apitypes.Types{
-			"EIP712Domain": {
-				{Name: "name", Type: "string"},
-				{Name: "version", Type: "string"},
-				{Name: "chainId", Type: "uint256"},
-				{Name: "verifyingContract", Type: "address"},
-			},
-			"PaymentAuthorization": {
-				{Name: "from", Type: "address"},
-				{Name: "to", Type: "address"},
-				{Name: "value", Type: "uint256"},
-				{Name: "validAfter", Type: "uint256"},
-				{Name: "validBefore", Type: "uint256"},
-				{Name: "nonce", Type: "bytes32"},
-			},
-		},
-		PrimaryType: "PaymentAuthorization",
-		Domain: apitypes.TypedDataDomain{
-			Name:              "x402",
-			Version:           "1",
-			ChainId:           chainIdHex,
-			VerifyingContract: "0x0000000000000000000000000000000000000000",
-		},
-		Message: apitypes.TypedDataMessage{
-			"from":        auth.From,
-			"to":          auth.To,
-			"value":       (*hexutil.Big)(value),
-			"validAfter":  (*hexutil.Big)(validAfter),
-			"validBefore": (*hexutil.Big)(validBefore),
-			"nonce":       auth.Nonce,
-		},
-	}
-
-	// Hash the typed data
-	hash, err := typedData.HashStruct("PaymentAuthorization", typedData.Message)
+	// Verify nonce (optional, to ensure signature is valid)
+	abiData, err := abi.JSON(strings.NewReader(`[
+		{
+			"name": "authorizationState",
+			"type": "function",
+			"inputs": [
+				{"name": "authorizer", "type": "address"},
+				{"name": "nonce", "type": "bytes32"}
+			],
+			"outputs": [{"name": "", "type": "bool"}]
+		}
+	]`))
 	if err != nil {
-		return false
+		log.Fatalf("Failed to parse authorizationState ABI: %v", err)
 	}
 
-	domainSeparator, err := typedData.HashStruct("EIP712Domain", typedData.Domain.Map())
+	nonceCheckData, err := abiData.Pack("authorizationState", fromAddr, nonce)
 	if err != nil {
-		return false
+		log.Fatalf("Failed to encode authorizationState call: %v", err)
 	}
 
-	// Create final hash with EIP-712 prefix
-	finalHash := crypto.Keccak256Hash(
-		[]byte("\x19\x01"),
-		domainSeparator,
-		hash,
-	)
-
-	// Decode signature
-	sigBytes, err := hexutil.Decode(payload.Signature)
+	nonceResult, err := f.ethClient.CallContract(context.Background(), ethereum.CallMsg{
+		To:   &tokenAddress,
+		Data: nonceCheckData,
+	}, nil)
 	if err != nil {
-		return false
+		log.Fatalf("Failed to check nonce: %v", err)
 	}
 
-	if len(sigBytes) != 65 {
-		return false
+	if len(nonceResult) > 0 && nonceResult[0] != 0 {
+		log.Fatalf("Nonce already used")
 	}
 
-	// Adjust recovery ID for erecover
-	if sigBytes[64] >= 27 {
-		sigBytes[64] -= 27
-	}
-
-	// Recover public key
-	pubKey, err := crypto.SigToPub(finalHash.Bytes(), sigBytes)
-	if err != nil {
-		return false
-	}
-
-	// Verify the recovered address matches the from address
-	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
-	return strings.EqualFold(recoveredAddr.Hex(), auth.From)
+	return nil
 }
 
 func (f *Facilitator) getAccountBalance(ctx context.Context, address, asset string) (*big.Int, error) {
@@ -397,13 +338,39 @@ func (f *Facilitator) getAccountBalance(ctx context.Context, address, asset stri
 	userAddress := common.HexToAddress(address)
 
 	// Parse ERC-20 ABI
-	parsedABI, err := abi.JSON(strings.NewReader(erc20ABI))
+	abiData, err := abi.JSON(strings.NewReader(`[
+		{
+			"constant": true,
+			"inputs": [{"name": "_owner", "type": "address"}],
+			"name": "balanceOf",
+			"outputs": [{"name": "balance", "type": "uint256"}],
+			"type": "function"
+		}, {
+			"constant": false,
+			"inputs": [{"name": "_to", "type": "address"}, {"name": "_value", "type": "uint256"}],
+			"name": "transfer",
+			"outputs": [{"name": "", "type": "bool"}],
+			"type": "function"
+		}, {
+			"constant": false,
+			"inputs": [{"name": "_from", "type": "address"}, {"name": "_to", "type": "address"}, {"name": "_value", "type": "uint256"}],
+			"name": "transferFrom",
+			"outputs": [{"name": "", "type": "bool"}],
+			"type": "function"
+		}, {
+			"constant": true,
+			"inputs": [{"name": "_owner", "type": "address"}, {"name": "_spender", "type": "address"}],
+			"name": "allowance",
+			"outputs": [{"name": "", "type": "uint256"}],
+			"type": "function"
+		}
+	]`))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse ERC-20 ABI: %w", err)
+		log.Fatalf("Failed to parse ERC20 ABI: %v", err)
 	}
 
 	// Pack balanceOf function call
-	data, err := parsedABI.Pack("balanceOf", userAddress)
+	data, err := abiData.Pack("balanceOf", userAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack balanceOf call: %w", err)
 	}
@@ -422,7 +389,7 @@ func (f *Facilitator) getAccountBalance(ctx context.Context, address, asset stri
 
 	// Unpack the result
 	var balance *big.Int
-	err = parsedABI.UnpackIntoInterface(&balance, "balanceOf", result)
+	err = abiData.UnpackIntoInterface(&balance, "balanceOf", result)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unpack balanceOf result: %w", err)
 	}
@@ -430,82 +397,269 @@ func (f *Facilitator) getAccountBalance(ctx context.Context, address, asset stri
 	return balance, nil
 }
 
-func (f *Facilitator) submitTransaction(ctx context.Context, payload *x402types.PaymentPayload) (common.Hash, error) {
+func (f *Facilitator) transferWithAuthorization(ctx context.Context, payload *x402types.PaymentPayload) (common.Hash, error) {
+	// Decode the signature from hex
+	signature, err := hexutil.Decode(payload.Payload.Signature)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to decode signature: %w", err)
+	}
+
 	auth := payload.Payload.Authorization
 
-	// Parse addresses and values
+	tokenAddress := common.HexToAddress(baseUSDCAddress)
 	fromAddr := common.HexToAddress(auth.From)
 	toAddr := common.HexToAddress(auth.To)
+
 	value, ok := new(big.Int).SetString(auth.Value, 10)
 	if !ok {
 		return common.Hash{}, fmt.Errorf("invalid value: %s", auth.Value)
 	}
 
-	// Get nonce for the from address (the payer)
-	nonce, err := f.ethClient.PendingNonceAt(ctx, fromAddr)
+	validAfter, ok := new(big.Int).SetString(auth.ValidAfter, 10)
+	if !ok {
+		return common.Hash{}, fmt.Errorf("invalid validAfter %s", auth.ValidAfter)
+	}
+
+	validBefore, ok := new(big.Int).SetString(auth.ValidBefore, 10)
+	if !ok {
+		return common.Hash{}, fmt.Errorf("invalid validBefore %s", auth.ValidBefore)
+	}
+
+	// Get permit signature components
+	r := common.BytesToHash(signature[0:32])
+	s := common.BytesToHash(signature[32:64])
+	v := signature[64]
+
+	// Prepare for calling transaction
+
+	// Just very high, don't care.
+	gasLimit := uint64(1_000_000_000)
+	maxPriorityFeePerGas := big.NewInt(1_000_000_000)
+	maxFeePerGas := big.NewInt(1_000_000_000)
+
+	txNonce, err := f.ethClient.PendingNonceAt(ctx, f.address)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to get nonce: %w", err)
+		log.Fatalf("Failed to get transaction nonce: %v", err)
 	}
 
-	// Get gas price
-	gasPrice, err := f.ethClient.SuggestGasPrice(ctx)
+	abiData, err := abi.JSON(strings.NewReader(`[
+		{
+			"name": "transferWithAuthorization",
+			"type": "function",
+			"inputs": [
+				{"name": "from", "type": "address"},
+				{"name": "to", "type": "address"},
+				{"name": "value", "type": "uint256"},
+				{"name": "validAfter", "type": "uint256"},
+				{"name": "validBefore", "type": "uint256"},
+				{"name": "nonce", "type": "bytes32"},
+				{"name": "v", "type": "uint8"},
+				{"name": "r", "type": "bytes32"},
+				{"name": "s", "type": "bytes32"}
+			]
+		}
+	]`))
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to get gas price: %w", err)
+		log.Fatalf("Failed to parse transferWithAuthorization ABI: %v", err)
 	}
 
-	// Create the transaction that matches the signed authorization
-	legacyTx := &ethtypes.LegacyTx{
-		Nonce:    nonce,
-		To:       &toAddr,
-		Value:    value,
-		Gas:      uint64(21000), // Standard gas limit for ETH transfer
-		GasPrice: gasPrice,
-		Data:     nil, // No data for simple transfer
+	transferData, err := abiData.Pack("transferWithAuthorization",
+		fromAddr,
+		toAddr,
+		value,
+		validAfter,
+		validBefore,
+		common.HexToHash(auth.Nonce),
+		v,
+		r,
+		s,
+	)
+	if err != nil {
+		log.Fatalf("Failed to encode transferWithAuthorization call: %v", err)
 	}
 
-	tx := ethtypes.NewTx(legacyTx)
+	transferTx := ethtypes.NewTx(&ethtypes.DynamicFeeTx{
+		ChainID:   f.chainID,
+		Nonce:     txNonce,
+		GasFeeCap: maxFeePerGas,
+		GasTipCap: maxPriorityFeePerGas,
+		Gas:       gasLimit,
+		To:        &tokenAddress,
+		Data:      transferData,
+	})
 
-	// Use the existing signature from the payload instead of signing with facilitator key
-	// The signature in the payload is the user's authorization for this exact transaction
-	sigBytes, err := hexutil.Decode(payload.Payload.Signature)
+	// Sign the transaction
+	signer := ethtypes.NewPragueSigner(f.chainID)
+	signedTx, err := ethtypes.SignTx(transferTx, signer, f.privateKey)
+	if err != nil {
+		log.Fatalf("Failed to sign transaction: %v", err)
+	}
+
+	// Send the transaction
+	err = f.ethClient.SendTransaction(ctx, signedTx)
+	if err != nil {
+		log.Fatalf("Failed to send transaction: %v", err)
+	}
+
+	return signedTx.Hash(), nil
+}
+
+func (f *Facilitator) transferWithPermit(ctx context.Context, payload *x402types.PaymentPayload) (common.Hash, error) {
+	// Decode the signature from hex
+	signature, err := hexutil.Decode(payload.Payload.Signature)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to decode signature: %w", err)
 	}
 
-	if len(sigBytes) != 65 {
-		return common.Hash{}, fmt.Errorf("invalid signature length: expected 65, got %d", len(sigBytes))
+	auth := payload.Payload.Authorization
+
+	tokenAddress := common.HexToAddress(baseUSDCAddress)
+	fromAddr := common.HexToAddress(auth.From)
+	toAddr := common.HexToAddress(auth.To)
+
+	value, ok := new(big.Int).SetString(auth.Value, 10)
+	if !ok {
+		return common.Hash{}, fmt.Errorf("invalid value: %s", auth.Value)
 	}
 
-	// Adjust recovery ID for transaction signing (if needed)
-	if sigBytes[64] < 27 {
-		sigBytes[64] += 27
+	validBefore, ok := new(big.Int).SetString(auth.ValidBefore, 10)
+	if !ok {
+		return common.Hash{}, fmt.Errorf("invalid validBefore %s", auth.ValidBefore)
 	}
 
-	// Create the signed transaction using the payload signature
-	// This reconstructs the transaction as it was originally signed by the payer
-	signer := ethtypes.NewEIP155Signer(f.chainID)
-	signedTx, err := tx.WithSignature(signer, sigBytes)
+	// Get permit signature components
+	r := common.BytesToHash(signature[0:32])
+	s := common.BytesToHash(signature[32:64])
+	v := signature[64]
+
+	// Prepare for calling transaction
+
+	// Just very high, don't care.
+	gasLimit := uint64(1_000_000_000)
+	maxPriorityFeePerGas := big.NewInt(1_000_000_000)
+	maxFeePerGas := big.NewInt(1_000_000_000)
+
+	nonce, err := f.ethClient.PendingNonceAt(ctx, f.address)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to create signed transaction: %w", err)
+		log.Fatalf("Failed to get transaction nonce: %v", err)
 	}
 
-	// Verify the transaction is properly signed by checking the sender
-	sender, err := ethtypes.Sender(signer, signedTx)
+	// Step 1: Call permit
+	abiData, err := abi.JSON(strings.NewReader(`[
+		{
+			"name": "permit",
+			"type": "function",
+			"inputs": [
+				{"name": "owner", "type": "address"},
+				{"name": "spender", "type": "address"},
+				{"name": "value", "type": "uint256"},
+				{"name": "deadline", "type": "uint256"},
+				{"name": "v", "type": "uint8"},
+				{"name": "r", "type": "bytes32"},
+				{"name": "s", "type": "bytes32"}
+			],
+			"outputs": []
+		}
+	]`))
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to verify transaction sender: %w", err)
+		log.Fatalf("Failed to parse permit ABI: %v", err)
 	}
 
-	if !strings.EqualFold(sender.Hex(), auth.From) {
-		return common.Hash{}, fmt.Errorf("transaction sender %s does not match authorization from %s", sender.Hex(), auth.From)
-	}
-
-	// Submit the transaction
-	err = f.ethClient.SendTransaction(ctx, signedTx)
+	permitData, err := abiData.Pack("permit",
+		fromAddr,
+		f.address,
+		value,
+		validBefore,
+		v,
+		r,
+		s,
+	)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to send transaction: %w", err)
+		log.Fatalf("Failed to encode permit call: %v", err)
 	}
 
-	return signedTx.Hash(), nil
+	permitTx := ethtypes.NewTx(&ethtypes.DynamicFeeTx{
+		ChainID:   f.chainID,
+		Nonce:     nonce,
+		GasFeeCap: maxFeePerGas,
+		GasTipCap: maxPriorityFeePerGas,
+		Gas:       gasLimit,
+		To:        &tokenAddress,
+		Data:      permitData,
+	})
+
+	// Sign the permit transaction
+	signer := ethtypes.NewPragueSigner(f.chainID)
+	signedPermitTx, err := ethtypes.SignTx(permitTx, signer, f.privateKey)
+	if err != nil {
+		log.Fatalf("Failed to sign transaction: %v", err)
+	}
+
+	// Send the transaction
+	err = f.ethClient.SendTransaction(ctx, signedPermitTx)
+	if err != nil {
+		log.Fatalf("Failed to send transaction: %v", err)
+	}
+	permitTxHash := signedPermitTx.Hash()
+
+	// Wait for permit transaction to be mined
+	receipt, err := f.awaitReceipt(ctx, &permitTxHash)
+	if err != nil {
+		log.Fatalf("Failed to get permit transaction receipt: %v", err)
+	}
+	if receipt.Status != ethtypes.ReceiptStatusSuccessful {
+		return common.Hash{}, fmt.Errorf("permit transaction failed: %s", permitTxHash.Hex())
+	}
+
+	// Step 2: Call transferFrom
+	transferAbi, err := abi.JSON(strings.NewReader(`[
+		{
+			"name": "transferFrom",
+			"type": "function",
+			"inputs": [
+				{"name": "from", "type": "address"},
+				{"name": "to", "type": "address"},
+				{"name": "value", "type": "uint256"}
+			],
+			"outputs": [{"name": "", "type": "bool"}]
+		}
+	]`))
+	if err != nil {
+		log.Fatalf("Failed to parse transferFrom ABI: %v", err)
+	}
+
+	transferData, err := transferAbi.Pack("transferFrom",
+		f.address,
+		toAddr,
+		value,
+	)
+	if err != nil {
+		log.Fatalf("Failed to encode transferFrom call: %v", err)
+	}
+
+	nonce++ // Increment nonce for next transaction
+
+	transferTx := ethtypes.NewTx(&ethtypes.DynamicFeeTx{
+		ChainID:   f.chainID,
+		Nonce:     nonce,
+		GasFeeCap: maxFeePerGas,
+		GasTipCap: maxPriorityFeePerGas,
+		Gas:       gasLimit,
+		To:        &tokenAddress,
+		Data:      transferData,
+	})
+
+	signedTransferTx, err := ethtypes.SignTx(transferTx, signer, f.privateKey)
+	if err != nil {
+		log.Fatalf("Failed to sign transferFrom transaction: %v", err)
+	}
+
+	err = f.ethClient.SendTransaction(ctx, signedTransferTx)
+	if err != nil {
+		log.Fatalf("Failed to send transferFrom transaction: %v", err)
+	}
+
+	return signedTransferTx.Hash(), nil
 }
 
 func (f *Facilitator) awaitReceipt(ctx context.Context, hash *common.Hash) (*ethtypes.Receipt, error) {

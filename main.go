@@ -1,10 +1,11 @@
 package main
 
 import (
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+	"github.com/x40/x402-tenderly/core"
 	"log"
 	"os"
-
-	"github.com/joho/godotenv"
 )
 
 func main() {
@@ -22,8 +23,35 @@ func main() {
 	if network == "" {
 		network = "localhost"
 	}
+	privateKey := os.Getenv("WALLET_PRIVATE_KEY")
+	if privateKey == "" {
+		log.Fatal("WALLET_PRIVATE_KEY environment variable not set")
+	}
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "4020"
+	}
+
+	// Create facilitator instance
+	facilitator, err := core.NewFacilitatorFromHex(privateKey, rpcURL, network)
+	if err != nil {
+		log.Fatalf("Failed to create facilitator: %v", err)
+	}
+
+	// Create Gin router
+	r := gin.Default()
+
+	// Add detailed logging middleware
+	r.Use(core.DetailedLoggingMiddleware())
+	r.Use(gin.Recovery())
+
+	// Configure routes
+	r.POST("/verify", facilitator.VerifyPaymentHandler)
+	r.POST("/settle", facilitator.SettlePaymentHandler)
+	r.GET("/health", facilitator.HealthHandler)
+
+	err = r.Run(":" + port)
+	if err != nil {
+		log.Fatal(err)
 	}
 }
