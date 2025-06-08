@@ -48,7 +48,7 @@ func main() {
 			walletAddress,
 			x402gin.WithFacilitatorConfig(facilitatorConfig),
 			x402gin.WithTestnet(false),
-			// TODO(marko): This is weird.
+			// NOTE(marko): This is weird. How is this used?
 			x402gin.WithResource("http://localhost:"+port+"/tip"),
 		),
 		func(c *gin.Context) {

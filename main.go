@@ -19,10 +19,6 @@ func main() {
 	if rpcURL == "" {
 		log.Fatal("RPC_URL environment variable not set")
 	}
-	network := os.Getenv("NETWORK")
-	if network == "" {
-		network = "localhost"
-	}
 	privateKey := os.Getenv("WALLET_PRIVATE_KEY")
 	if privateKey == "" {
 		log.Fatal("WALLET_PRIVATE_KEY environment variable not set")
@@ -33,7 +29,7 @@ func main() {
 	}
 
 	// Create facilitator instance
-	facilitator, err := core.NewFacilitatorFromHex(privateKey, rpcURL, network)
+	facilitator, err := core.NewFacilitatorFromHex(privateKey, rpcURL)
 	if err != nil {
 		log.Fatalf("Failed to create facilitator: %v", err)
 	}

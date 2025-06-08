@@ -24,21 +24,19 @@ import (
 )
 
 const x402Version = 1
-
-// TODO(marko): This needs to be configurable.
 const baseUSDCAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+const baseNetwork = "base"
 
 // Facilitator handles payment verification and settlement
 type Facilitator struct {
 	ethClient  *ethclient.Client
 	chainID    *big.Int
-	network    string
 	privateKey *ecdsa.PrivateKey
 	address    common.Address
 }
 
 // NewFacilitator creates a new facilitator instance
-func NewFacilitator(privateKey *ecdsa.PrivateKey, rpcURL string, network string) (*Facilitator, error) {
+func NewFacilitator(privateKey *ecdsa.PrivateKey, rpcURL string) (*Facilitator, error) {
 	ethClient, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Ethereum client: %w", err)
@@ -52,14 +50,13 @@ func NewFacilitator(privateKey *ecdsa.PrivateKey, rpcURL string, network string)
 	return &Facilitator{
 		ethClient:  ethClient,
 		chainID:    chainID,
-		network:    network,
 		privateKey: privateKey,
 		address:    address,
 	}, nil
 }
 
 // NewFacilitator creates a new facilitator instance
-func NewFacilitatorFromHex(privateKeyHex string, rpcURL string, network string) (*Facilitator, error) {
+func NewFacilitatorFromHex(privateKeyHex string, rpcURL string) (*Facilitator, error) {
 	// Remove 0x prefix if present
 	privateKeyHex = strings.TrimPrefix(privateKeyHex, "0x")
 
@@ -68,13 +65,13 @@ func NewFacilitatorFromHex(privateKeyHex string, rpcURL string, network string) 
 		return nil, fmt.Errorf("invalid private key: %w", err)
 	}
 
-	return NewFacilitator(privateKey, rpcURL, network)
+	return NewFacilitator(privateKey, rpcURL)
 }
 
 // VerifyPayment verifies a payment payload
 func (f *Facilitator) VerifyPayment(ctx context.Context, payload *x402types.PaymentPayload, requirements *x402types.PaymentRequirements) (*x402types.VerifyResponse, error) {
 	// Verify network matches
-	if payload.Network != f.network {
+	if payload.Network != baseNetwork {
 		return &x402types.VerifyResponse{
 			IsValid:       false,
 			InvalidReason: stringPtr("invalid_network"),
@@ -156,7 +153,7 @@ func (f *Facilitator) SettlePayment(ctx context.Context, payload *x402types.Paym
 		return &x402types.SettleResponse{
 			Success:     false,
 			ErrorReason: verifyResp.InvalidReason,
-			Network:     f.network,
+			Network:     baseNetwork,
 			Transaction: "0x0000000000000000000000000000000000000000000000000000000000000000",
 		}, nil
 	}
@@ -177,7 +174,7 @@ func (f *Facilitator) SettlePayment(ctx context.Context, payload *x402types.Paym
 		return &x402types.SettleResponse{
 			Success:     false,
 			ErrorReason: stringPtr("invalid_transaction_state"),
-			Network:     f.network,
+			Network:     baseNetwork,
 			Transaction: txHash.Hex(),
 		}, nil
 	}
@@ -186,7 +183,7 @@ func (f *Facilitator) SettlePayment(ctx context.Context, payload *x402types.Paym
 		Success:     true,
 		Payer:       verifyResp.Payer,
 		Transaction: txHash.Hex(),
-		Network:     f.network,
+		Network:     baseNetwork,
 	}, nil
 }
 
@@ -276,7 +273,7 @@ func (f *Facilitator) HealthHandler(c *gin.Context) {
 
 	health := map[string]interface{}{
 		"status":  "healthy",
-		"network": f.network,
+		"network": baseNetwork,
 		"chainId": f.chainID.String(),
 	}
 
