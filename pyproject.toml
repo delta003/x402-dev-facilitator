@@ -1,0 +1,28 @@
+[project]
+name = "x402-dev-facilitator"
+version = "0.1.0"
+description = "Development for x402"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "python-dotenv>=1.0.0",
+    "web3>=6.15.1",
+    "pydantic>=2.0.0",
+    "eth-account>=0.13.7",
+]
+
+[tool.uv]
+managed = true
+dev-dependencies = [
+    "pytest>=8.3.3",
+    "ruff>=0.11.2",
+]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = [".venv", "proto", "protogen", "substrait"]
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "UP", "I"]
+# Do not auto-fix unused variables. This is really annoying when IntelliJ runs autofix while editing.
+unfixable = ["F841"]
