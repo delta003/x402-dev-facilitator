@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 # Add the parent directory to the path to import the client module
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from python.client import Client
+from pyx402 import Client
 
 
 class ExampleClient:
