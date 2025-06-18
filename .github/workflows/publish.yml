@@ -32,8 +32,16 @@ jobs:
 
     - name: Update version in pyproject.toml
       run: |
-        sed -i "s/version = \".*\"/version = \"${{ steps.get_version.outputs.version }}\"/" pyproject.toml
-        echo "Updated version to: ${{ steps.get_version.outputs.version }}"
+        VERSION="${{ steps.get_version.outputs.version }}"
+        uv run python -c "
+        import re
+        with open('pyproject.toml', 'r') as f:
+            content = f.read()
+        content = re.sub(r'version = \".*\"', 'version = \"$VERSION\"', content)
+        with open('pyproject.toml', 'w') as f:
+            f.write(content)
+        "
+        echo "Updated version to: $VERSION"
         grep "version.*=" pyproject.toml
 
     - name: Build package
