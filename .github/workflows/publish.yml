@@ -1,0 +1,52 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # Required for trusted publishing to PyPI
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+
+    - name: Install build dependencies
+      run: uv tool install build twine
+
+    - name: Extract version from tag
+      id: get_version
+      run: |
+        # Remove 'v' prefix if present and set as version
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+    - name: Update version in pyproject.toml
+      run: |
+        sed -i 's/version = ".*"/version = "${{ steps.get_version.outputs.version }}"/' pyproject.toml
+        echo "Updated version to: ${{ steps.get_version.outputs.version }}"
+        grep "version.*=" pyproject.toml
+
+    - name: Build package
+      run: uv tool run build
+
+    - name: Check package
+      run: uv tool run twine check dist/*
+
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        # Uses trusted publishing
+        verbose: true
