@@ -26,8 +26,9 @@ jobs:
     - name: Extract version from tag
       id: get_version
       run: |
-        # Remove 'v' prefix if present and set as version
-        VERSION=${GITHUB_REF#refs/tags/v}
+        # Extract version from tag (remove 'refs/tags/' and optional 'v' prefix)
+        TAG_NAME=${GITHUB_REF#refs/tags/}
+        VERSION=${TAG_NAME#v}
         echo "version=$VERSION" >> $GITHUB_OUTPUT
 
     - name: Update version in pyproject.toml
