@@ -78,14 +78,6 @@ func (f *Facilitator) VerifyPayment(ctx context.Context, payload *x402types.Paym
 		}, nil
 	}
 
-	// Verify x402 version
-	if payload.X402Version != x402Version {
-		return &x402types.VerifyResponse{
-			IsValid:       false,
-			InvalidReason: stringPtr("unsupported_x402_version"),
-		}, nil
-	}
-
 	// Verify authorization details
 	auth := payload.Payload.Authorization
 
@@ -210,11 +202,6 @@ func (f *Facilitator) VerifyPaymentHandler(c *gin.Context) {
 		return
 	}
 
-	if req.X402Version != x402Version {
-		http.Error(w, "Unsupported x402 version", http.StatusBadRequest)
-		return
-	}
-
 	resp, err := f.VerifyPayment(r.Context(), &req.PaymentPayload, &req.PaymentRequirements)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -243,11 +230,6 @@ func (f *Facilitator) SettlePaymentHandler(c *gin.Context) {
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if req.X402Version != x402Version {
-		http.Error(w, "Unsupported x402 version", http.StatusBadRequest)
 		return
 	}
 
