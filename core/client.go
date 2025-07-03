@@ -18,17 +18,21 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 
+	"github.com/coinbase/x402/go/pkg/facilitatorclient"
 	x402types "github.com/coinbase/x402/go/pkg/types"
 )
 
 // Client represents x402 payment client
 // NOTE(marko): There isn't currently an official Go implementation of the client.
 type Client struct {
-	httpClient *http.Client
-	privateKey *ecdsa.PrivateKey
-	address    common.Address
-	maxValue   *big.Int
-	chainID    int64
+	httpClient            *http.Client
+	privateKey            *ecdsa.PrivateKey
+	address               common.Address
+	maxValue              *big.Int
+	chainID               int64
+	facilitatorClient     *facilitatorclient.FacilitatorClient
+	useReceipts           bool
+	enableReceiptFallback bool
 }
 
 // NewClient creates a new x402 payment client
@@ -62,6 +66,43 @@ func NewClientFromHex(privateKeyHex string, chainID int64) (*Client, error) {
 	return NewClient(privateKey, chainID), nil
 }
 
+// NewClientWithFacilitator creates a new x402 client with facilitator configured for receipts
+func NewClientWithFacilitator(privateKey *ecdsa.PrivateKey, chainID int64, facilitatorConfig *x402types.FacilitatorConfig) *Client {
+	client := NewClient(privateKey, chainID)
+	client.SetFacilitator(facilitatorConfig)
+	client.SetUseReceipts(true)
+	client.SetEnableReceiptFallback(true)
+	return client
+}
+
+// NewClientWithFacilitatorFromHex creates a new x402 client with facilitator from hex private key
+func NewClientWithFacilitatorFromHex(privateKeyHex string, chainID int64, facilitatorConfig *x402types.FacilitatorConfig) (*Client, error) {
+	client, err := NewClientFromHex(privateKeyHex, chainID)
+	if err != nil {
+		return nil, err
+	}
+	client.SetFacilitator(facilitatorConfig)
+	client.SetUseReceipts(true)
+	client.SetEnableReceiptFallback(true)
+	return client, nil
+}
+
+// NewClientWithFacilitatorURL creates a new x402 client with facilitator URL for convenience
+func NewClientWithFacilitatorURL(privateKey *ecdsa.PrivateKey, chainID int64, facilitatorURL string) *Client {
+	config := &x402types.FacilitatorConfig{
+		URL: facilitatorURL,
+	}
+	return NewClientWithFacilitator(privateKey, chainID, config)
+}
+
+// NewClientWithFacilitatorURLFromHex creates a new x402 client with facilitator URL from hex private key
+func NewClientWithFacilitatorURLFromHex(privateKeyHex string, chainID int64, facilitatorURL string) (*Client, error) {
+	config := &x402types.FacilitatorConfig{
+		URL: facilitatorURL,
+	}
+	return NewClientWithFacilitatorFromHex(privateKeyHex, chainID, config)
+}
+
 // SetMaxValue sets the maximum payment value allowed
 func (c *Client) SetMaxValue(maxValue *big.Int) {
 	c.maxValue = maxValue
@@ -70,6 +111,27 @@ func (c *Client) SetMaxValue(maxValue *big.Int) {
 // SetHTTPClient sets a custom HTTP client
 func (c *Client) SetHTTPClient(client *http.Client) {
 	c.httpClient = client
+}
+
+// SetFacilitator sets the facilitator client for settlement and receipt generation
+func (c *Client) SetFacilitator(facilitatorConfig *x402types.FacilitatorConfig) {
+	c.facilitatorClient = facilitatorclient.NewFacilitatorClient(facilitatorConfig)
+}
+
+
+// SetUseReceipts enables or disables receipt mode
+func (c *Client) SetUseReceipts(useReceipts bool) {
+	c.useReceipts = useReceipts
+}
+
+// SetEnableReceiptFallback enables fallback to traditional payments if receipt settlement fails
+func (c *Client) SetEnableReceiptFallback(enableFallback bool) {
+	c.enableReceiptFallback = enableFallback
+}
+
+// HasFacilitator returns true if a facilitator is configured
+func (c *Client) HasFacilitator() bool {
+	return c.facilitatorClient != nil
 }
 
 // WrapHTTPClient returns an HTTP client that automatically handles x402 payments
@@ -146,10 +208,31 @@ func (prt *PaymentRoundTripper) handlePaymentRequired(originalReq *http.Request,
 		return nil, fmt.Errorf("payment amount %s exceeds maximum allowed %s", paymentRequirements.MaxAmountRequired, prt.client.maxValue.String())
 	}
 
-	// Create payment header
-	paymentHeader, err := prt.createPaymentHeader(&paymentRequirements)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create payment header: %w", err)
+	// Determine whether to use receipts or traditional payments
+	var paymentHeader string
+	var err error
+
+	if prt.client.useReceipts && prt.client.HasFacilitator() {
+		// Use receipt mode: settle via facilitator and create receipt header
+		paymentHeader, err = prt.createReceiptPaymentHeader(&paymentRequirements, originalReq.Context())
+		if err != nil {
+			if prt.client.enableReceiptFallback {
+				// Fall back to traditional payment mode
+				fmt.Printf("Receipt settlement failed, falling back to payment mode: %v\n", err)
+				paymentHeader, err = prt.createPaymentHeader(&paymentRequirements)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create payment header: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("failed to create receipt header: %w", err)
+			}
+		}
+	} else {
+		// Use traditional payment mode
+		paymentHeader, err = prt.createPaymentHeader(&paymentRequirements)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create payment header: %w", err)
+		}
 	}
 
 	// Clone the original request with payment header
@@ -194,6 +277,57 @@ func (prt *PaymentRoundTripper) createPaymentHeader(requirements *x402types.Paym
 	}
 
 	return base64.StdEncoding.EncodeToString(payloadBytes), nil
+}
+
+// createReceiptPaymentHeader creates a receipt header by settling payment via facilitator
+func (prt *PaymentRoundTripper) createReceiptPaymentHeader(requirements *x402types.PaymentRequirements, ctx context.Context) (string, error) {
+	// First create a traditional payment payload for settlement
+	paymentPayload, err := prt.createPaymentPayload(requirements)
+	if err != nil {
+		return "", fmt.Errorf("failed to create payment payload: %w", err)
+	}
+
+	// Settle the payment via facilitator to get transaction hash
+	txHash, err := prt.client.settlePaymentWithFacilitator(ctx, paymentPayload, requirements)
+	if err != nil {
+		return "", fmt.Errorf("failed to settle payment: %w", err)
+	}
+
+	// Create receipt header from transaction hash
+	receiptHeader, err := prt.client.createReceiptHeader(txHash, requirements)
+	if err != nil {
+		return "", fmt.Errorf("failed to create receipt header: %w", err)
+	}
+
+	return receiptHeader, nil
+}
+
+// createPaymentPayload creates a payment payload without encoding to base64
+func (prt *PaymentRoundTripper) createPaymentPayload(requirements *x402types.PaymentRequirements) (*x402types.PaymentPayload, error) {
+	// Create authorization
+	auth, err := prt.createAuthorization(requirements)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create authorization: %w", err)
+	}
+
+	// Sign the authorization
+	signature, err := prt.signAuthorization(&auth)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign authorization: %w", err)
+	}
+
+	// Create payment payload
+	payload := &x402types.PaymentPayload{
+		X402Version: x402Version,
+		Scheme:      requirements.Scheme,
+		Network:     requirements.Network,
+		Payload: &x402types.ExactEvmPayload{
+			Signature:     signature,
+			Authorization: &auth,
+		},
+	}
+
+	return payload, nil
 }
 
 // createAuthorization creates the authorization for payment
@@ -339,4 +473,70 @@ func (c *Client) PostJSON(ctx context.Context, url string, data interface{}) (*h
 	}
 
 	return c.Post(ctx, url, "application/json", bytes.NewReader(jsonData))
+}
+
+// settlePaymentWithFacilitator settles a payment using the facilitator and returns the transaction hash
+func (c *Client) settlePaymentWithFacilitator(ctx context.Context, paymentPayload *x402types.PaymentPayload, requirements *x402types.PaymentRequirements) (string, error) {
+	if c.facilitatorClient == nil {
+		return "", fmt.Errorf("facilitator client not configured")
+	}
+
+	// Use the facilitator to settle the payment
+	settleResponse, err := c.facilitatorClient.Settle(paymentPayload, requirements)
+	if err != nil {
+		return "", fmt.Errorf("failed to settle payment: %w", err)
+	}
+
+	if !settleResponse.Success {
+		return "", fmt.Errorf("settlement failed: %s", *settleResponse.ErrorReason)
+	}
+
+	return settleResponse.Transaction, nil
+}
+
+// createReceiptHeader creates a receipt header from a transaction hash
+func (c *Client) createReceiptHeader(txHash string, requirements *x402types.PaymentRequirements) (string, error) {
+	// Create a signature for the transaction hash to prove ownership
+	signature, err := c.signTransactionHash(txHash)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign transaction hash: %w", err)
+	}
+
+	// Create the receipt payload
+	receiptPayload := ReceiptPayload{
+		X402Version: x402Version,
+		Scheme:      requirements.Scheme,
+		Network:     requirements.Network,
+		Payload: &ExactEvmReceipt{
+			Transaction: txHash,
+			Signature:   signature,
+		},
+	}
+
+	// Encode as JSON and base64
+	payloadBytes, err := json.Marshal(receiptPayload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal receipt payload: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(payloadBytes), nil
+}
+
+// signTransactionHash signs a transaction hash to prove ownership
+func (c *Client) signTransactionHash(txHash string) (string, error) {
+	// Create a hash of the transaction hash
+	msgHash := crypto.Keccak256Hash([]byte(txHash))
+
+	// Sign the hash
+	signature, err := crypto.Sign(msgHash.Bytes(), c.privateKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign transaction hash: %w", err)
+	}
+
+	// Adjust v for Ethereum signature format
+	if signature[64] == 0 || signature[64] == 1 {
+		signature[64] += 27
+	}
+
+	return fmt.Sprintf("0x%x", signature), nil
 }
