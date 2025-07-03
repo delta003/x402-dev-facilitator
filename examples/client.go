@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	x402types "github.com/coinbase/x402/go/pkg/types"
 	"github.com/delta003/x402-dev-facilitator/core"
 	"github.com/joho/godotenv"
 	"io"
@@ -20,10 +21,17 @@ type Client struct {
 	client    *core.Client
 }
 
-func NewClient(serverURL string, privateKey string, chainId int64) (*Client, error) {
+func NewClient(serverURL string, privateKey string, chainId int64, facilitatorURL string) (*Client, error) {
 	client, err := core.NewClientFromHex(privateKey, chainId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client from private key: %w", err)
+	}
+
+	if facilitatorURL != "" {
+		fmt.Printf("Using facilitator URL: %s\n", facilitatorURL)
+		client.SetFacilitator(&x402types.FacilitatorConfig{
+			URL: facilitatorURL,
+		})
 	}
 
 	client.SetMaxValue(big.NewInt(100_000_000))
@@ -103,8 +111,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("Invalid CHAIN_ID: %v", err)
 	}
+	// An optional variable!
+	facilitatorURL := os.Getenv("FACILITATOR_URL")
+	if facilitatorURL != "" {
+		fmt.Printf("FACILITATOR_URL environment variable is set. Using receipt-based payment.\n")
+	}
 
-	client, err := NewClient(serverURL, privateKey, chainID)
+	client, err := NewClient(serverURL, privateKey, chainID, facilitatorURL)
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)
 	}

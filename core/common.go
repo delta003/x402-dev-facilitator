@@ -65,7 +65,7 @@ func DetailedLoggingMiddleware() gin.HandlerFunc {
 		responseBody := &bytes.Buffer{}
 		bodyWriter := &responseBodyWriter{
 			ResponseWriter: c.Writer,
-			body:          responseBody,
+			body:           responseBody,
 		}
 		c.Writer = bodyWriter
 
@@ -93,14 +93,14 @@ func DetailedLoggingMiddleware() gin.HandlerFunc {
 				}
 			}
 		}
-		
+
 		// Log response body
 		if responseBody.Len() > 0 {
 			log.Printf("Response Body: %s", responseBody.String())
 		} else {
 			log.Printf("Response Body: (empty)")
 		}
-		
+
 		log.Printf("=== RESPONSE END ===\n")
 	}
 }

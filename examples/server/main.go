@@ -1,7 +1,6 @@
 package main
 
 import (
-	x402gin "github.com/coinbase/x402/go/pkg/gin"
 	x402types "github.com/coinbase/x402/go/pkg/types"
 	"github.com/delta003/x402-dev-facilitator/core"
 	"github.com/gin-gonic/gin"
@@ -43,13 +42,13 @@ func main() {
 
 	r.GET(
 		"/tip",
-		x402gin.PaymentMiddleware(
+		core.PaymentMiddleware(
 			big.NewFloat(42.0),
 			walletAddress,
-			x402gin.WithFacilitatorConfig(facilitatorConfig),
-			x402gin.WithTestnet(false),
+			core.WithFacilitatorConfig(facilitatorConfig),
+			core.WithTestnet(false),
 			// NOTE(marko): This is weird. How is this used?
-			x402gin.WithResource("http://localhost:"+port+"/tip"),
+			core.WithResource("http://localhost:"+port+"/tip"),
 		),
 		func(c *gin.Context) {
 			// NOTE(marko): This is executed even if settlement fails.

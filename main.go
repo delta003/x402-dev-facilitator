@@ -43,6 +43,8 @@ func main() {
 
 	// Configure routes
 	r.POST("/verify", facilitator.VerifyPaymentHandler)
+	// This is an extension to the x402 protocol. See core/extensions.go for details.
+	r.POST("/verify-receipt", facilitator.VerifyReceiptHandler)
 	r.POST("/settle", facilitator.SettlePaymentHandler)
 	r.GET("/health", facilitator.HealthHandler)
 
