@@ -25,14 +25,13 @@ import (
 // Client represents x402 payment client
 // NOTE(marko): There isn't currently an official Go implementation of the client.
 type Client struct {
-	httpClient            *http.Client
-	privateKey            *ecdsa.PrivateKey
-	address               common.Address
-	maxValue              *big.Int
-	chainID               int64
-	facilitatorClient     *facilitatorclient.FacilitatorClient
-	useReceipts           bool
-	enableReceiptFallback bool
+	httpClient *http.Client
+	privateKey *ecdsa.PrivateKey
+	address    common.Address
+	maxValue   *big.Int
+	chainID    int64
+	// If present, this client will use the facilitator for payment settlement and pass receipt as X-PAYMENT header.
+	facilitatorClient *facilitatorclient.FacilitatorClient
 }
 
 // NewClient creates a new x402 payment client
@@ -66,43 +65,6 @@ func NewClientFromHex(privateKeyHex string, chainID int64) (*Client, error) {
 	return NewClient(privateKey, chainID), nil
 }
 
-// NewClientWithFacilitator creates a new x402 client with facilitator configured for receipts
-func NewClientWithFacilitator(privateKey *ecdsa.PrivateKey, chainID int64, facilitatorConfig *x402types.FacilitatorConfig) *Client {
-	client := NewClient(privateKey, chainID)
-	client.SetFacilitator(facilitatorConfig)
-	client.SetUseReceipts(true)
-	client.SetEnableReceiptFallback(true)
-	return client
-}
-
-// NewClientWithFacilitatorFromHex creates a new x402 client with facilitator from hex private key
-func NewClientWithFacilitatorFromHex(privateKeyHex string, chainID int64, facilitatorConfig *x402types.FacilitatorConfig) (*Client, error) {
-	client, err := NewClientFromHex(privateKeyHex, chainID)
-	if err != nil {
-		return nil, err
-	}
-	client.SetFacilitator(facilitatorConfig)
-	client.SetUseReceipts(true)
-	client.SetEnableReceiptFallback(true)
-	return client, nil
-}
-
-// NewClientWithFacilitatorURL creates a new x402 client with facilitator URL for convenience
-func NewClientWithFacilitatorURL(privateKey *ecdsa.PrivateKey, chainID int64, facilitatorURL string) *Client {
-	config := &x402types.FacilitatorConfig{
-		URL: facilitatorURL,
-	}
-	return NewClientWithFacilitator(privateKey, chainID, config)
-}
-
-// NewClientWithFacilitatorURLFromHex creates a new x402 client with facilitator URL from hex private key
-func NewClientWithFacilitatorURLFromHex(privateKeyHex string, chainID int64, facilitatorURL string) (*Client, error) {
-	config := &x402types.FacilitatorConfig{
-		URL: facilitatorURL,
-	}
-	return NewClientWithFacilitatorFromHex(privateKeyHex, chainID, config)
-}
-
 // SetMaxValue sets the maximum payment value allowed
 func (c *Client) SetMaxValue(maxValue *big.Int) {
 	c.maxValue = maxValue
@@ -116,17 +78,6 @@ func (c *Client) SetHTTPClient(client *http.Client) {
 // SetFacilitator sets the facilitator client for settlement and receipt generation
 func (c *Client) SetFacilitator(facilitatorConfig *x402types.FacilitatorConfig) {
 	c.facilitatorClient = facilitatorclient.NewFacilitatorClient(facilitatorConfig)
-}
-
-
-// SetUseReceipts enables or disables receipt mode
-func (c *Client) SetUseReceipts(useReceipts bool) {
-	c.useReceipts = useReceipts
-}
-
-// SetEnableReceiptFallback enables fallback to traditional payments if receipt settlement fails
-func (c *Client) SetEnableReceiptFallback(enableFallback bool) {
-	c.enableReceiptFallback = enableFallback
 }
 
 // HasFacilitator returns true if a facilitator is configured
@@ -212,20 +163,11 @@ func (prt *PaymentRoundTripper) handlePaymentRequired(originalReq *http.Request,
 	var paymentHeader string
 	var err error
 
-	if prt.client.useReceipts && prt.client.HasFacilitator() {
+	if prt.client.HasFacilitator() {
 		// Use receipt mode: settle via facilitator and create receipt header
 		paymentHeader, err = prt.createReceiptPaymentHeader(&paymentRequirements, originalReq.Context())
 		if err != nil {
-			if prt.client.enableReceiptFallback {
-				// Fall back to traditional payment mode
-				fmt.Printf("Receipt settlement failed, falling back to payment mode: %v\n", err)
-				paymentHeader, err = prt.createPaymentHeader(&paymentRequirements)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create payment header: %w", err)
-				}
-			} else {
-				return nil, fmt.Errorf("failed to create receipt header: %w", err)
-			}
+			return nil, fmt.Errorf("failed to create receipt header: %w", err)
 		}
 	} else {
 		// Use traditional payment mode

@@ -170,9 +170,9 @@ func (f *Facilitator) VerifyReceipt(ctx context.Context, payload *ReceiptPayload
 		}, nil
 	}
 
-	// Verify signature is valid for the from address of the receipt
+	// Verify transaction signature is valid
 	signer := ethtypes.NewPragueSigner(f.chainID)
-	fromAddr, err := signer.Sender(tx)
+	_, err = signer.Sender(tx)
 	if err != nil {
 		return &x402types.VerifyResponse{
 			IsValid:       false,
@@ -180,8 +180,17 @@ func (f *Facilitator) VerifyReceipt(ctx context.Context, payload *ReceiptPayload
 		}, nil
 	}
 
-	// Verify the receipt signature matches the transaction from address
-	if err := f.verifyReceiptSignature(payload.Payload.Signature, payload.Payload.Transaction, fromAddr); err != nil {
+	// Parse transfer logs to get the USDC token transfer details
+	transferAmount, transferTo, transferFrom, err := f.parseTransferFromLogsWithSender(receipt.Logs)
+	if err != nil {
+		return &x402types.VerifyResponse{
+			IsValid:       false,
+			InvalidReason: stringPtr("invalid_transfer_logs"),
+		}, nil
+	}
+
+	// Verify the receipt signature matches the USDC transfer sender address
+	if err := f.verifyReceiptSignature(payload.Payload.Signature, payload.Payload.Transaction, transferFrom); err != nil {
 		return &x402types.VerifyResponse{
 			IsValid:       false,
 			InvalidReason: stringPtr("invalid_receipt_signature"),
@@ -193,15 +202,6 @@ func (f *Facilitator) VerifyReceipt(ctx context.Context, payload *ReceiptPayload
 		return &x402types.VerifyResponse{
 			IsValid:       false,
 			InvalidReason: stringPtr("invalid_recipient"),
-		}, nil
-	}
-
-	// Verify transaction transferred the right amount of USDC
-	transferAmount, transferTo, err := f.parseTransferFromLogs(receipt.Logs, fromAddr)
-	if err != nil {
-		return &x402types.VerifyResponse{
-			IsValid:       false,
-			InvalidReason: stringPtr("invalid_transfer_logs"),
 		}, nil
 	}
 
@@ -231,7 +231,7 @@ func (f *Facilitator) VerifyReceipt(ctx context.Context, payload *ReceiptPayload
 
 	return &x402types.VerifyResponse{
 		IsValid: true,
-		Payer:   stringPtr(fromAddr.Hex()),
+		Payer:   stringPtr(transferFrom.Hex()),
 	}, nil
 }
 
@@ -805,6 +805,11 @@ func (f *Facilitator) verifyReceiptSignature(signature, txHash string, fromAddr 
 		return fmt.Errorf("failed to decode signature: %w", err)
 	}
 
+	// Adjust v for crypto.SigToPub compatibility (convert from Ethereum format)
+	if len(sigBytes) == 65 && (sigBytes[64] == 27 || sigBytes[64] == 28) {
+		sigBytes[64] -= 27
+	}
+
 	// Create the message hash that should have been signed
 	// The message is typically the transaction hash
 	msgHash := crypto.Keccak256Hash([]byte(txHash))
@@ -824,6 +829,36 @@ func (f *Facilitator) verifyReceiptSignature(signature, txHash string, fromAddr 
 	}
 
 	return nil
+}
+
+// parseTransferFromLogsWithSender parses ERC20 Transfer event logs to extract transfer details including sender
+func (f *Facilitator) parseTransferFromLogsWithSender(logs []*ethtypes.Log) (*big.Int, common.Address, common.Address, error) {
+	// ERC20 Transfer event signature: Transfer(address indexed from, address indexed to, uint256 value)
+	transferEventSignature := crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
+
+	for _, logEntry := range logs {
+		// Check if this is a Transfer event
+		if len(logEntry.Topics) != 3 || logEntry.Topics[0] != transferEventSignature {
+			continue
+		}
+
+		// Extract from address (first topic after event signature)
+		fromAddr := common.HexToAddress(logEntry.Topics[1].Hex())
+
+		// Extract to address (second topic after event signature)
+		toAddr := common.HexToAddress(logEntry.Topics[2].Hex())
+
+		// Extract value from log data
+		if len(logEntry.Data) != 32 {
+			continue
+		}
+
+		value := new(big.Int).SetBytes(logEntry.Data)
+
+		return value, toAddr, fromAddr, nil
+	}
+
+	return nil, common.Address{}, common.Address{}, fmt.Errorf("no transfer event found")
 }
 
 // parseTransferFromLogs parses ERC20 Transfer event logs to extract transfer details
