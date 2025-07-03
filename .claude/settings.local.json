@@ -4,7 +4,9 @@
       "Bash(mkdir:*)",
       "Bash(go build:*)",
       "Bash(find:*)",
-      "Bash(gofmt:*)"
+      "Bash(gofmt:*)",
+      "Bash(go list:*)",
+      "Bash(go doc:*)"
     ],
     "deny": []
   }

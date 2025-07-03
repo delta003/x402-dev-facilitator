@@ -1,6 +1,8 @@
 package core
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -155,8 +157,7 @@ func PaymentMiddleware(amount *big.Float, address string, opts ...Options) gin.H
 		}
 
 		payment := c.GetHeader("X-PAYMENT")
-		paymentPayload, err := types.DecodePaymentPayloadFromBase64(payment)
-		if err != nil {
+		if payment == "" {
 			if isWebBrowser {
 				html := options.CustomPaywallHTML
 				if html == "" {
@@ -174,31 +175,105 @@ func PaymentMiddleware(amount *big.Float, address string, opts ...Options) gin.H
 			})
 			return
 		}
-		paymentPayload.X402Version = x402Version
 
-		// Verify payment
-		response, err := facilitatorClient.Verify(paymentPayload, paymentRequirements)
+		// Decode the base64 payment to determine if it's a receipt or payment
+		decoded, err := base64.StdEncoding.DecodeString(payment)
 		if err != nil {
-			fmt.Println("failed to verify", err)
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
-				"error":       err.Error(),
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error":       "Invalid base64 encoding in X-PAYMENT header",
 				"x402Version": x402Version,
 			})
 			return
 		}
 
-		if !response.IsValid {
-			fmt.Println("Invalid payment: ", response.InvalidReason)
-			c.AbortWithStatusJSON(http.StatusPaymentRequired, gin.H{
-				"error":       response.InvalidReason,
-				"accepts":     []*types.PaymentRequirements{paymentRequirements},
-				"x402Version": x402Version,
-			})
+		var response *types.VerifyResponse
+		var paymentPayload *types.PaymentPayload
+		isReceipt := false
+
+		// Determine if this is a receipt or payment payload
+		if isReceiptPayload(decoded) {
+			fmt.Println("Receipt payload detected, verifying receipt")
+			isReceipt = true
+
+			// Decode as receipt payload
+			receiptPayload, err := DecodeReceiptPayloadFromBase64(payment)
+			if err != nil {
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+					"error":       "Invalid receipt payload",
+					"x402Version": x402Version,
+				})
+				return
+			}
+			receiptPayload.X402Version = x402Version
+
+			// Verify receipt with facilitator
+			response, err = verifyReceiptWithFacilitator(options.FacilitatorConfig.URL, receiptPayload, paymentRequirements)
+			if err != nil {
+				fmt.Println("failed to verify receipt", err)
+				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+					"error":       err.Error(),
+					"x402Version": x402Version,
+				})
+				return
+			}
+
+			if !response.IsValid {
+				fmt.Println("Invalid receipt: ", response.InvalidReason)
+				c.AbortWithStatusJSON(http.StatusPaymentRequired, gin.H{
+					"error":       response.InvalidReason,
+					"accepts":     []*types.PaymentRequirements{paymentRequirements},
+					"x402Version": x402Version,
+				})
+				return
+			}
+
+			fmt.Println("Receipt verified, proceeding")
+		} else {
+			fmt.Println("Payment payload detected, verifying payment")
+
+			// Decode as payment payload
+			var err error
+			paymentPayload, err = types.DecodePaymentPayloadFromBase64(payment)
+			if err != nil {
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+					"error":       "Invalid payment payload",
+					"x402Version": x402Version,
+				})
+				return
+			}
+			paymentPayload.X402Version = x402Version
+
+			// Verify payment
+			response, err = facilitatorClient.Verify(paymentPayload, paymentRequirements)
+			if err != nil {
+				fmt.Println("failed to verify payment", err)
+				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+					"error":       err.Error(),
+					"x402Version": x402Version,
+				})
+				return
+			}
+
+			if !response.IsValid {
+				fmt.Println("Invalid payment: ", response.InvalidReason)
+				c.AbortWithStatusJSON(http.StatusPaymentRequired, gin.H{
+					"error":       response.InvalidReason,
+					"accepts":     []*types.PaymentRequirements{paymentRequirements},
+					"x402Version": x402Version,
+				})
+				return
+			}
+
+			fmt.Println("Payment verified, proceeding")
+		}
+
+		// For receipts, just let the request through
+		if isReceipt {
+			c.Next()
 			return
 		}
 
-		fmt.Println("Payment verified, proceeding")
-
+		// For payments, we need to handle settlement after the request completes
 		// Create a custom response writer to intercept the response
 		writer := &responseWriter{
 			ResponseWriter: c.Writer,
@@ -283,4 +358,79 @@ func (w *responseWriter) WriteString(s string) (int, error) {
 // getPaywallHtml is the default paywall HTML for the PaymentMiddleware.
 func getPaywallHtml(_ *PaymentMiddlewareOptions) string {
 	return "<html><body>Payment Required</body></html>"
+}
+
+// DecodeReceiptPayloadFromBase64 decodes a base64 encoded receipt payload
+func DecodeReceiptPayloadFromBase64(encoded string) (*ReceiptPayload, error) {
+	if encoded == "" {
+		return nil, fmt.Errorf("encoded receipt payload is empty")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64: %w", err)
+	}
+
+	var payload ReceiptPayload
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal receipt payload: %w", err)
+	}
+
+	return &payload, nil
+}
+
+// isReceiptPayload determines if the payload is a receipt payload based on its structure
+func isReceiptPayload(payloadBytes []byte) bool {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return false
+	}
+
+	// Check if the payload has receipt-specific fields
+	if payloadObj, ok := payload["payload"].(map[string]interface{}); ok {
+		// Receipt payloads have "transaction" and "signature" fields
+		_, hasTransaction := payloadObj["transaction"]
+		_, hasSignature := payloadObj["signature"]
+		return hasTransaction && hasSignature
+	}
+
+	return false
+}
+
+// verifyReceiptWithFacilitator calls the facilitator's verify receipt endpoint
+func verifyReceiptWithFacilitator(facilitatorURL string, receiptPayload *ReceiptPayload, paymentRequirements *types.PaymentRequirements) (*types.VerifyResponse, error) {
+	// Create a request similar to the facilitator's VerifyReceiptHandler
+	reqBody := struct {
+		X402Version         int                        `json:"x402Version"`
+		ReceiptPayload      *ReceiptPayload            `json:"receiptPayload"`
+		PaymentRequirements *types.PaymentRequirements `json:"paymentRequirements"`
+	}{
+		X402Version:         x402Version,
+		ReceiptPayload:      receiptPayload,
+		PaymentRequirements: paymentRequirements,
+	}
+
+	reqBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Make HTTP request to the facilitator's verify-receipt endpoint
+	url := strings.TrimSuffix(facilitatorURL, "/") + "/verify-receipt"
+	resp, err := http.Post(url, "application/json", bytes.NewReader(reqBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to call verify receipt endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("verify receipt failed with status %d", resp.StatusCode)
+	}
+
+	var verifyResponse types.VerifyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&verifyResponse); err != nil {
+		return nil, fmt.Errorf("failed to decode verify response: %w", err)
+	}
+
+	return &verifyResponse, nil
 }
