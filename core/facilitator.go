@@ -133,6 +133,108 @@ func (f *Facilitator) VerifyPayment(ctx context.Context, payload *x402types.Paym
 	}, nil
 }
 
+// VerifyReceipt verifies a receipt payload
+func (f *Facilitator) VerifyReceipt(ctx context.Context, payload *ReceiptPayload, requirements *x402types.PaymentRequirements) (*x402types.VerifyResponse, error) {
+	// Verify network matches
+	if payload.Network != baseNetwork {
+		return &x402types.VerifyResponse{
+			IsValid:       false,
+			InvalidReason: stringPtr("invalid_network"),
+		}, nil
+	}
+
+	// Get the transaction receipt from the network and verify it's successful
+	txHash := common.HexToHash(payload.Payload.Transaction)
+	receipt, err := f.ethClient.TransactionReceipt(ctx, txHash)
+	if err != nil {
+		return &x402types.VerifyResponse{
+			IsValid:       false,
+			InvalidReason: stringPtr("transaction_not_found"),
+		}, nil
+	}
+
+	// Verify transaction was successful
+	if receipt.Status != ethtypes.ReceiptStatusSuccessful {
+		return &x402types.VerifyResponse{
+			IsValid:       false,
+			InvalidReason: stringPtr("transaction_failed"),
+		}, nil
+	}
+
+	// Get the full transaction to verify details
+	tx, _, err := f.ethClient.TransactionByHash(ctx, txHash)
+	if err != nil {
+		return &x402types.VerifyResponse{
+			IsValid:       false,
+			InvalidReason: stringPtr("transaction_not_found"),
+		}, nil
+	}
+
+	// Verify signature is valid for the from address of the receipt
+	signer := ethtypes.NewPragueSigner(f.chainID)
+	fromAddr, err := signer.Sender(tx)
+	if err != nil {
+		return &x402types.VerifyResponse{
+			IsValid:       false,
+			InvalidReason: stringPtr("invalid_transaction_signature"),
+		}, nil
+	}
+
+	// Verify the receipt signature matches the transaction from address
+	if err := f.verifyReceiptSignature(payload.Payload.Signature, payload.Payload.Transaction, fromAddr); err != nil {
+		return &x402types.VerifyResponse{
+			IsValid:       false,
+			InvalidReason: stringPtr("invalid_receipt_signature"),
+		}, nil
+	}
+
+	// Verify recipient is the USDC contract address
+	if tx.To() == nil || !strings.EqualFold(tx.To().Hex(), baseUSDCAddress) {
+		return &x402types.VerifyResponse{
+			IsValid:       false,
+			InvalidReason: stringPtr("invalid_recipient"),
+		}, nil
+	}
+
+	// Verify transaction transferred the right amount of USDC
+	transferAmount, transferTo, err := f.parseTransferFromLogs(receipt.Logs, fromAddr)
+	if err != nil {
+		return &x402types.VerifyResponse{
+			IsValid:       false,
+			InvalidReason: stringPtr("invalid_transfer_logs"),
+		}, nil
+	}
+
+	// Verify the recipient matches requirements
+	if !strings.EqualFold(transferTo.Hex(), requirements.PayTo) {
+		return &x402types.VerifyResponse{
+			IsValid:       false,
+			InvalidReason: stringPtr("invalid_transfer_recipient"),
+		}, nil
+	}
+
+	// Verify the amount matches requirements
+	requiredAmount, ok := new(big.Int).SetString(requirements.MaxAmountRequired, 10)
+	if !ok {
+		return &x402types.VerifyResponse{
+			IsValid:       false,
+			InvalidReason: stringPtr("invalid_required_amount"),
+		}, nil
+	}
+
+	if transferAmount.Cmp(requiredAmount) < 0 {
+		return &x402types.VerifyResponse{
+			IsValid:       false,
+			InvalidReason: stringPtr("insufficient_transfer_amount"),
+		}, nil
+	}
+
+	return &x402types.VerifyResponse{
+		IsValid: true,
+		Payer:   stringPtr(fromAddr.Hex()),
+	}, nil
+}
+
 // SettlePayment processes the actual payment settlement
 func (f *Facilitator) SettlePayment(ctx context.Context, payload *x402types.PaymentPayload, requirements *x402types.PaymentRequirements) (*x402types.SettleResponse, error) {
 	// First verify the payment
@@ -203,6 +305,37 @@ func (f *Facilitator) VerifyPaymentHandler(c *gin.Context) {
 	}
 
 	resp, err := f.VerifyPayment(r.Context(), &req.PaymentPayload, &req.PaymentRequirements)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// VerifyReceiptHandler handles receipt verification requests
+func (f *Facilitator) VerifyReceiptHandler(c *gin.Context) {
+	r := c.Request
+	w := c.Writer
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		X402Version         int                           `json:"x402Version"`
+		ReceiptPayload      ReceiptPayload                `json:"receiptPayload"`
+		PaymentRequirements x402types.PaymentRequirements `json:"paymentRequirements"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := f.VerifyReceipt(r.Context(), &req.ReceiptPayload, &req.PaymentRequirements)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -662,6 +795,70 @@ func (f *Facilitator) awaitReceipt(ctx context.Context, hash *common.Hash) (*eth
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// verifyReceiptSignature verifies that the signature was created by the transaction sender
+func (f *Facilitator) verifyReceiptSignature(signature, txHash string, fromAddr common.Address) error {
+	// Decode the signature from hex
+	sigBytes, err := hexutil.Decode(signature)
+	if err != nil {
+		return fmt.Errorf("failed to decode signature: %w", err)
+	}
+
+	// Create the message hash that should have been signed
+	// The message is typically the transaction hash
+	msgHash := crypto.Keccak256Hash([]byte(txHash))
+
+	// Recover the public key from the signature
+	pubKey, err := crypto.SigToPub(msgHash.Bytes(), sigBytes)
+	if err != nil {
+		return fmt.Errorf("failed to recover public key: %w", err)
+	}
+
+	// Get the address from the public key
+	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+
+	// Verify the address matches the transaction sender
+	if !strings.EqualFold(recoveredAddr.Hex(), fromAddr.Hex()) {
+		return fmt.Errorf("signature verification failed: expected %s, got %s", fromAddr.Hex(), recoveredAddr.Hex())
+	}
+
+	return nil
+}
+
+// parseTransferFromLogs parses ERC20 Transfer event logs to extract transfer details
+func (f *Facilitator) parseTransferFromLogs(logs []*ethtypes.Log, expectedFrom common.Address) (*big.Int, common.Address, error) {
+	// ERC20 Transfer event signature: Transfer(address indexed from, address indexed to, uint256 value)
+	transferEventSignature := crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
+
+	for _, logEntry := range logs {
+		// Check if this is a Transfer event
+		if len(logEntry.Topics) != 3 || logEntry.Topics[0] != transferEventSignature {
+			continue
+		}
+
+		// Extract from address (first topic after event signature)
+		fromAddr := common.HexToAddress(logEntry.Topics[1].Hex())
+
+		// Extract to address (second topic after event signature)
+		toAddr := common.HexToAddress(logEntry.Topics[2].Hex())
+
+		// Check if this transfer is from the expected sender
+		if !strings.EqualFold(fromAddr.Hex(), expectedFrom.Hex()) {
+			continue
+		}
+
+		// Extract value from log data
+		if len(logEntry.Data) != 32 {
+			continue
+		}
+
+		value := new(big.Int).SetBytes(logEntry.Data)
+
+		return value, toAddr, nil
+	}
+
+	return nil, common.Address{}, fmt.Errorf("no matching transfer event found")
 }
 
 func stringPtr(s string) *string {
