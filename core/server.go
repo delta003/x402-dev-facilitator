@@ -26,6 +26,8 @@ type PaymentMiddlewareOptions struct {
 	CustomPaywallHTML string
 	Resource          string
 	ResourceRootURL   string
+	// Receipt-specific options
+	EnableReceipts bool
 }
 
 // Options is the type for the options for the PaymentMiddleware.
@@ -93,6 +95,13 @@ func WithResourceRootURL(resourceRootURL string) Options {
 	}
 }
 
+// WithEnableReceipts is an option for the PaymentMiddleware to enable receipt verification.
+func WithEnableReceipts(enableReceipts bool) Options {
+	return func(options *PaymentMiddlewareOptions) {
+		options.EnableReceipts = enableReceipts
+	}
+}
+
 // PaymentMiddleware is the Gin middleware for the resource server using the x402payment protocol.
 // Amount: the decimal denominated amount to charge (ex: 0.01 for 1 cent)
 func PaymentMiddleware(amount *big.Float, address string, opts ...Options) gin.HandlerFunc {
@@ -102,6 +111,7 @@ func PaymentMiddleware(amount *big.Float, address string, opts ...Options) gin.H
 		},
 		MaxTimeoutSeconds: 60,
 		Testnet:           true,
+		EnableReceipts:    true, // Enable receipts by default
 	}
 
 	for _, opt := range opts {
@@ -192,6 +202,15 @@ func PaymentMiddleware(amount *big.Float, address string, opts ...Options) gin.H
 
 		// Determine if this is a receipt or payment payload
 		if isReceiptPayload(decoded) {
+			// Check if receipts are allowed
+			if !options.EnableReceipts {
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+					"error":       "Receipts are not accepted",
+					"x402Version": x402Version,
+				})
+				return
+			}
+
 			fmt.Println("Receipt payload detected, verifying receipt")
 			isReceipt = true
 
@@ -433,4 +452,20 @@ func verifyReceiptWithFacilitator(facilitatorURL string, receiptPayload *Receipt
 	}
 
 	return &verifyResponse, nil
+}
+
+// getReceiptStringOrDefault returns the receipt value if not empty, otherwise returns the default value
+func getReceiptStringOrDefault(receiptValue, defaultValue string) string {
+	if receiptValue != "" {
+		return receiptValue
+	}
+	return defaultValue
+}
+
+// getReceiptSchemaOrDefault returns the receipt schema if not nil, otherwise returns the default schema
+func getReceiptSchemaOrDefault(receiptSchema, defaultSchema *json.RawMessage) *json.RawMessage {
+	if receiptSchema != nil {
+		return receiptSchema
+	}
+	return defaultSchema
 }
