@@ -99,9 +99,9 @@ func main() {
 	if serverURL == "" {
 		log.Fatal("SERVER_URL environment variable is not set")
 	}
-	privateKey := os.Getenv("WALLET_PRIVATE_KEY")
+	privateKey := os.Getenv("CLIENT_WALLET_PRIVATE_KEY")
 	if privateKey == "" {
-		log.Fatal("WALLET_PRIVATE_KEY environment variable is not set")
+		log.Fatal("CLIENT_WALLET_PRIVATE_KEY environment variable is not set")
 	}
 	strChainID := os.Getenv("CHAIN_ID")
 	if strChainID == "" {

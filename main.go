@@ -19,13 +19,9 @@ func main() {
 	if rpcURL == "" {
 		log.Fatal("RPC_URL environment variable not set")
 	}
-	privateKey := os.Getenv("WALLET_PRIVATE_KEY")
+	privateKey := os.Getenv("FACILITATOR_WALLET_PRIVATE_KEY")
 	if privateKey == "" {
-		log.Fatal("WALLET_PRIVATE_KEY environment variable not set")
-	}
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "4020"
+		log.Fatal("FACILITATOR_WALLET_PRIVATE_KEY environment variable not set")
 	}
 
 	// Create facilitator instance
@@ -48,7 +44,7 @@ func main() {
 	r.POST("/settle", facilitator.SettlePaymentHandler)
 	r.GET("/health", facilitator.HealthHandler)
 
-	err = r.Run(":" + port)
+	err = r.Run(":4020")
 	if err != nil {
 		log.Fatal(err)
 	}

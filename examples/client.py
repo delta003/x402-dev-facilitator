@@ -89,9 +89,9 @@ def main():
         print("Error: SERVER_URL environment variable is not set", file=sys.stderr)
         sys.exit(1)
 
-    private_key = os.getenv("WALLET_PRIVATE_KEY")
+    private_key = os.getenv("CLIENT_WALLET_PRIVATE_KEY")
     if not private_key:
-        print("Error: WALLET_PRIVATE_KEY environment variable is not set", file=sys.stderr)
+        print("Error: CLIENT_WALLET_PRIVATE_KEY environment variable is not set", file=sys.stderr)
         sys.exit(1)
 
     chain_id_str = os.getenv("CHAIN_ID")

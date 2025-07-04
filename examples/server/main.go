@@ -31,9 +31,9 @@ func main() {
 	if port == "" {
 		port = "4021" // Default port if not set
 	}
-	walletAddress := os.Getenv("WALLET_ADDRESS")
+	walletAddress := os.Getenv("SERVER_WALLET_ADDRESS")
 	if walletAddress == "" {
-		log.Fatal("WALLET_ADDRESS environment variable is not set")
+		log.Fatal("SERVER_WALLET_ADDRESS environment variable is not set")
 	}
 
 	facilitatorConfig := &x402types.FacilitatorConfig{
