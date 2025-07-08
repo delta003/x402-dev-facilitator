@@ -9,6 +9,6 @@ Example server can be run with `go run examples/server/server.go`. Example clien
 
 https://github.com/delta003/x402-dev-facilitator/pull/1 extends the x402 protocol with verifiable receipt as an acceptable
 `X-PAYMENT` header. This means the client can settle payments, through a facilitator or not, while the server can use a
-facilitator to abstract blockchain interaction when validating a receipt.
+facilitator to abstract blockchain interaction when validating a receipt. This extension will likely be replaced with https://github.com/coinbase/x402/issues/277.
 
 NOTE: This was built to understand x402 and is heavily AI-generated. Do not use any of it in production.
