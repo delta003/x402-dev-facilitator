@@ -18,17 +18,13 @@ def main():
     if not tenderly_api_key:
         print("Error: TENDERLY_API_KEY environment variable is not set", file=sys.stderr)
         sys.exit(1)
-    tenderly_org = os.getenv("TENDERLY_ORG")
-    if not tenderly_org:
-        print("Error: TENDERLY_ORG environment variable is not set", file=sys.stderr)
-        sys.exit(1)
-    tenderly_project = os.getenv("TENDERLY_PROJECT")
-    if not tenderly_project:
-        print("Error: TENDERLY_PROJECT environment variable is not set", file=sys.stderr)
+    tenderly_api_url = os.getenv("TENDERLY_API_URL")
+    if not tenderly_api_url:
+        print("Error: TENDERLY_API_URL environment variable is not set", file=sys.stderr)
         sys.exit(1)
 
     client = httpx.Client(
-        base_url=f"https://api.tenderly.co/api/v1/account/{tenderly_org}/project/{tenderly_project}",
+        base_url=f"{tenderly_api_url}",
         headers={"X-Access-Key": tenderly_api_key},
     )
 
